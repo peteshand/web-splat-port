@@ -17,6 +17,10 @@ export class GaussianRenderer {
   private queue!: GPUQueue;
   private colorFormat!: GPUTextureFormat;
   private pipeline?: GPURenderPipeline;
+  private bgLayout0!: GPUBindGroupLayout; // group(0)
+  private bgLayout1!: GPUBindGroupLayout; // group(1)
+  private bindGroup0?: GPUBindGroup;
+  private bindGroup1?: GPUBindGroup;
 
   constructor(/* device: GPUDevice, queue: GPUQueue, colorFormat: GPUTextureFormat, sh_deg: number, compressed: boolean */) {}
 
@@ -34,8 +38,29 @@ export class GaussianRenderer {
     // Load WGSL from local shaders directory (copied from Rust project)
     const gaussianSrc = await loadWGSL(SHADERS.gaussian);
     r.gaussianModule = _device.createShaderModule({ code: gaussianSrc });
-    // TODO: create bind group layouts and pipeline layout mirroring Rust
-    // r.pipeline = r.createPipeline();
+    // Create bind group layouts matching gaussian.wgsl usage
+    // group(0) binding(2): points_2d storage read
+    r.bgLayout0 = r.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 2,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
+      ],
+    });
+    // group(1) binding(4): indices storage read
+    r.bgLayout1 = r.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 4,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
+      ],
+    });
+    // Create pipeline with explicit layout order [group0, group1]
+    r.pipeline = r.createPipeline([r.bgLayout0, r.bgLayout1]);
     return r;
   }
 
@@ -43,18 +68,35 @@ export class GaussianRenderer {
     // TODO
   }
 
-  prepare(/* encoder: GPUCommandEncoder, device: GPUDevice, queue: GPUQueue, pc: PointCloud, render_settings: SplattingArgs */): void {
-    // TODO
+  prepare(/* encoder: GPUCommandEncoder, device: GPUDevice, queue: GPUQueue, pc: PointCloud, render_settings: SplattingArgs */ pc: PointCloud): void {
+    // Create bind groups from point cloud buffers
+    this.bindGroup0 = this.device.createBindGroup({
+      layout: this.bgLayout0,
+      entries: [
+        { binding: 2, resource: { buffer: pc.gaussiansBuffer } },
+      ],
+    });
+    this.bindGroup1 = this.device.createBindGroup({
+      layout: this.bgLayout1,
+      entries: [
+        { binding: 4, resource: { buffer: pc.indicesBuffer } },
+      ],
+    });
   }
 
-  render(/* pass: GPURenderPassEncoder, pc: PointCloud */): void {
-    // TODO
+  render(pass: GPURenderPassEncoder, pc: PointCloud): void {
+    if (!this.pipeline || !this.bindGroup0 || !this.bindGroup1) return;
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, this.bindGroup0);
+    pass.setBindGroup(1, this.bindGroup1);
+    // Quad with 4 verts, instance per point
+    pass.draw(4, pc.num_points, 0, 0);
   }
 
-  private createPipeline(): GPURenderPipeline {
+  private createPipeline(layouts: GPUBindGroupLayout[]): GPURenderPipeline {
     // Placeholder: entry point names must match WGSL; we'll wire exact names during implementation.
     const pipeline = this.device.createRenderPipeline({
-      layout: "auto",
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: layouts }),
       vertex: {
         module: this.gaussianModule,
         entryPoint: "vs_main", // TODO: confirm with gaussian.wgsl
