@@ -130,6 +130,25 @@ export class GaussianRenderer {
     return r;
   }
 
+  // Encodes preprocess then radix sort; caller should submit encoder and then begin render pass and call render()
+  encodePreprocessAndSort(pc: PointCloud): GPUCommandEncoder {
+    // Ensure resources and bind groups exist for current point cloud
+    this.prepare(pc);
+    const encoder = this.device.createCommandEncoder();
+    // Preprocess to fill points_2d, depths, indices
+    this.runPreprocess(encoder, pc);
+    // Run radix sort if available and planned
+    if (this.sorter && this.sortPlan) {
+      this.sorter.sort(encoder, this.sortPlan, pc.num_points);
+      // Rebind render indices to sorted payload_a (final output after full passes)
+      this.bindGroup1 = this.device.createBindGroup({
+        layout: this.bgLayout1,
+        entries: [ { binding: 4, resource: { buffer: this.sortPlan.payload_a } } ],
+      });
+    }
+    return encoder;
+  }
+
   preprocess(/* encoder: GPUCommandEncoder, queue: GPUQueue, pc: PointCloud, render_settings: SplattingArgs */): void {
     // Deprecated in favor of runPreprocess(encoder, pc, settings)
   }
@@ -146,7 +165,8 @@ export class GaussianRenderer {
     this.bindGroup1 = this.device.createBindGroup({
       layout: this.bgLayout1,
       entries: [
-        { binding: 4, resource: { buffer: pc.indicesBuffer } },
+        // Use sorted indices if sorter is planned; otherwise fallback to original indices
+        { binding: 4, resource: { buffer: (this.sortPlan?.payload_a ?? pc.indicesBuffer) } },
       ],
     });
 
@@ -228,6 +248,58 @@ export class GaussianRenderer {
     const groups = Math.ceil(pc.num_points / wgSize);
     pass.dispatchWorkgroups(groups, 1, 1);
     pass.end();
+  }
+
+  // Minimal default uniforms writer to enable preprocess without full camera plumbing
+  // Writes identity matrices and viewport into CameraUniforms, and sane defaults into RenderSettings
+  public updateUniforms(viewport: [number, number]): void {
+    // Ensure buffers exist
+    if (!this.cameraUniformBuffer) {
+      this.cameraUniformBuffer = this.device.createBuffer({ size: 272, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    }
+    if (!this.renderSettingsBuffer) {
+      this.renderSettingsBuffer = this.device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    }
+    // CameraUniforms layout (272 bytes)
+    const camBuf = new ArrayBuffer(272);
+    const cam = new DataView(camBuf);
+    const writeMat4 = (base: number) => {
+      for (let i = 0; i < 16; i++) cam.setFloat32(base + i * 4, i % 5 === 0 ? 1 : 0, true);
+    };
+    writeMat4(0);    // view
+    writeMat4(64);   // view_inv
+    writeMat4(128);  // proj
+    writeMat4(192);  // proj_inv
+    cam.setFloat32(256, viewport[0], true); // viewport.x
+    cam.setFloat32(260, viewport[1], true); // viewport.y
+    cam.setFloat32(264, 1.0, true);        // focal.x
+    cam.setFloat32(268, 1.0, true);        // focal.y
+    this.queue.writeBuffer(this.cameraUniformBuffer, 0, camBuf);
+
+    // RenderSettings layout (80 bytes)
+    const rsBuf = new ArrayBuffer(80);
+    const rs = new DataView(rsBuf);
+    // clipping_box_min (vec4)
+    rs.setFloat32(0, -1e6, true); rs.setFloat32(4, -1e6, true); rs.setFloat32(8, -1e6, true); rs.setFloat32(12, 0, true);
+    // clipping_box_max (vec4)
+    rs.setFloat32(16, 1e6, true); rs.setFloat32(20, 1e6, true); rs.setFloat32(24, 1e6, true); rs.setFloat32(28, 0, true);
+    // gaussian_scaling f32 at 32
+    rs.setFloat32(32, 1.0, true);
+    // max_sh_deg u32 at 36
+    rs.setUint32(36, 0, true);
+    // show_env_map u32 at 40
+    rs.setUint32(40, 0, true);
+    // mip_splatting u32 at 44
+    rs.setUint32(44, 0, true);
+    // kernel_size f32 at 48
+    rs.setFloat32(48, 1.0, true);
+    // walltime f32 at 52
+    rs.setFloat32(52, 0.0, true);
+    // scene_extend f32 at 56
+    rs.setFloat32(56, 1.0, true);
+    // center vec3 at 64
+    rs.setFloat32(64, 0.0, true); rs.setFloat32(68, 0.0, true); rs.setFloat32(72, 0.0, true);
+    this.queue.writeBuffer(this.renderSettingsBuffer, 0, rsBuf);
   }
 
   render(pass: GPURenderPassEncoder, pc: PointCloud): void {

@@ -19,6 +19,8 @@ export class GPURSSorter {
   private zeroPipeline!: GPUComputePipeline;
   private histogramPipeline!: GPUComputePipeline;
   private prefixPipeline!: GPUComputePipeline;
+  private scatterEvenPipeline!: GPUComputePipeline;
+  private scatterOddPipeline!: GPUComputePipeline;
 
   // Tunables (match placeholders in WGSL)
   private histogramWgSize = 256; // {histogram_wg_size}
@@ -48,6 +50,8 @@ export class GPURSSorter {
     s.zeroPipeline = _device.createComputePipeline({ layout, compute: { module: s.module, entryPoint: "zero_histograms" } });
     s.histogramPipeline = _device.createComputePipeline({ layout, compute: { module: s.module, entryPoint: "calculate_histogram" } });
     s.prefixPipeline = _device.createComputePipeline({ layout, compute: { module: s.module, entryPoint: "prefix_histogram" } });
+    s.scatterEvenPipeline = _device.createComputePipeline({ layout, compute: { module: s.module, entryPoint: "scatter_even" } });
+    s.scatterOddPipeline = _device.createComputePipeline({ layout, compute: { module: s.module, entryPoint: "scatter_odd" } });
     return s;
   }
 
@@ -67,7 +71,7 @@ export class GPURSSorter {
     const histograms = this.device.createBuffer({ size: histoBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     return { infos, histograms, keys, keys_b, payload_a: payloadA, payload_b };
   }
-  // Encode zero + histogram + prefix passes. Scattering passes will be added next.
+  // Encode zero + histogram + prefix + scatter passes
   sort(encoder: GPUCommandEncoder, bufs: SortBuffers, numKeys: number): void {
     const bg = this.device.createBindGroup({
       layout: this.bgLayout,
@@ -112,7 +116,28 @@ export class GPURSSorter {
       c.dispatchWorkgroups(this.rsRadixSize / 2);
       c.end();
     }
-    // TODO: scatter_even + scatter_odd passes to finalize keys/payload reorder
+    // scatter passes (pairs). keys per workgroup = histogramWgSize * rs_scatter_block_rows
+    const keysPerWG = this.histogramWgSize * 15;
+    const groups = Math.ceil(infosData[1] / keysPerWG);
+    const pairs = Math.ceil(passes / 2);
+    for (let i = 0; i < pairs; i++) {
+      // even
+      {
+        const c = encoder.beginComputePass();
+        c.setPipeline(this.scatterEvenPipeline);
+        c.setBindGroup(0, bg);
+        c.dispatchWorkgroups(groups);
+        c.end();
+      }
+      // odd
+      {
+        const c = encoder.beginComputePass();
+        c.setPipeline(this.scatterOddPipeline);
+        c.setBindGroup(0, bg);
+        c.dispatchWorkgroups(groups);
+        c.end();
+      }
+    }
   }
 
   private injectConstants(src: string): string {
