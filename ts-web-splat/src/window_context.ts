@@ -8,7 +8,7 @@ export class WindowContext {
   private wgpu_context!: WGPUContext;
   private canvas!: HTMLCanvasElement;
   private ctx!: GPUCanvasContext;
-  private config!: GPUSwapChainDescriptor | undefined; // placeholder: modern API uses configure()
+  private config!: GPUCanvasConfiguration | undefined; // modern API uses context.configure()
 
   private pc!: PointCloud;
   private renderer!: GaussianRenderer;

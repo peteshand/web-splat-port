@@ -7,7 +7,8 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["dom", "dom.iterable", "es2022"]
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["@webgpu/types"]
   },
   "include": ["src/**/*"]
 }

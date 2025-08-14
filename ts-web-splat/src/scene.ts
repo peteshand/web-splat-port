@@ -1,5 +1,5 @@
 // Mirrors scene.rs
-import { PerspectiveCamera, PerspectiveProjection, focal2fov } from "./camera";
+import { PerspectiveCamera, PerspectiveProjection, focal2fov, fov2focal } from "./camera";
 
 export enum Split {
   Train = "train",

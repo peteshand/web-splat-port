@@ -1,18 +1,8 @@
 // Mirrors pointcloud.rs (skeleton)
+import { GenericGaussianPointCloud } from "./io";
 export type Vec3 = [number, number, number];
 
 export interface Aabb<T = number> { min: [T, T, T]; max: [T, T, T]; }
-
-export interface GenericGaussianPointCloud {
-  gaussians: ArrayBuffer;
-  sh_coefs: ArrayBuffer;
-  sh_deg: number;
-  num_points: number;
-  kernel_size?: number;
-  mip_splatting?: boolean;
-  background_color?: [number, number, number];
-  // compressed-state fields omitted for now
-}
 
 export class PointCloud {
   constructor(public num_points: number, public sh_deg: number) {}
