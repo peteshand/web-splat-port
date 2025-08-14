@@ -1,0 +1,14 @@
+{
+  "name": "ts-web-splat",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p .",
+    "lint": "echo 'add eslint later'",
+    "test": "echo 'no tests yet'"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}
