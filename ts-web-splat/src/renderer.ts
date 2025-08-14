@@ -1,8 +1,7 @@
 // Mirrors renderer.rs (skeleton)
-import { PointCloud } from "./pointcloud";
-import { loadWGSL, SHADERS } from "./shaders/loader";
-import { PerspectiveCamera } from "./camera";
-import { GPURSSorter } from "./gpu_rs";
+import { PointCloud } from "./pointcloud.js";
+import { loadWGSL, SHADERS } from "./shaders/loader.js";
+import { GPURSSorter } from "./gpu_rs.js";
 
 export interface SplattingArgs {
   // Subset; extend later to match Rust SplattingArgs

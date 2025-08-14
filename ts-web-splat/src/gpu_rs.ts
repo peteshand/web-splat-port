@@ -1,5 +1,5 @@
 // Mirrors gpu_rs.rs (skeleton for GPU radix sort)
-import { loadWGSL } from "./shaders/loader";
+import { loadWGSL } from "./shaders/loader.js";
 
 type SortBuffers = {
   infos: GPUBuffer;          // GeneralInfo (5 u32)

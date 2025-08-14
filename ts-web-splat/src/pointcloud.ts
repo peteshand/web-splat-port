@@ -1,5 +1,5 @@
 // Mirrors pointcloud.rs (skeleton)
-import { GenericGaussianPointCloud } from "./io";
+import { GenericGaussianPointCloud } from "./io.js";
 export type Vec3 = [number, number, number];
 
 export interface Aabb<T = number> { min: [T, T, T]; max: [T, T, T]; }
@@ -7,6 +7,7 @@ export interface Aabb<T = number> { min: [T, T, T]; max: [T, T, T]; }
 export class PointCloud {
   public gaussiansBuffer!: GPUBuffer;
   public shCoefsBuffer!: GPUBuffer;
+  public indicesBuffer!: GPUBuffer;
   public num_points: number;
   public sh_deg: number;
 
@@ -20,6 +21,10 @@ export class PointCloud {
     // Create storage buffers for gaussians and SH coefficients
     self.gaussiansBuffer = createAndUploadBuffer(device, pc.gaussians, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     self.shCoefsBuffer = createAndUploadBuffer(device, pc.sh_coefs, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
+    // Create a default indices buffer 0..num_points-1
+    const idx = new Uint32Array(self.num_points);
+    for (let i = 0; i < self.num_points; i++) idx[i] = i >>> 0;
+    self.indicesBuffer = createAndUploadBuffer(device, idx.buffer, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
     return self;
   }
 

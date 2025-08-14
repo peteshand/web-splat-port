@@ -1,6 +1,6 @@
-import { GaussianRenderer } from "./renderer";
-import { PointCloud } from "./pointcloud";
-import { createDummyPointCloud } from "./io";
+import { GaussianRenderer } from "./renderer.js";
+import { PointCloud } from "./pointcloud.js";
+import { createDummyPointCloud } from "./io.js";
 
 async function init() {
   if (!navigator.gpu) {
