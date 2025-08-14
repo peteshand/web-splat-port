@@ -2,6 +2,7 @@
 import { PointCloud } from "./pointcloud";
 import { loadWGSL, SHADERS } from "./shaders/loader";
 import { PerspectiveCamera } from "./camera";
+import { GPURSSorter } from "./gpu_rs";
 
 export interface SplattingArgs {
   // Subset; extend later to match Rust SplattingArgs
@@ -43,6 +44,9 @@ export class GaussianRenderer {
   private sortDispatchBuffer?: GPUBuffer; // DispatchIndirect
   private cameraUniformBuffer?: GPUBuffer;
   private renderSettingsBuffer?: GPUBuffer;
+  // Radix sorter
+  private sorter?: GPURSSorter;
+  private sortPlan?: ReturnType<GPURSSorter["planBuffers"]>;
 
   constructor(/* device: GPUDevice, queue: GPUQueue, colorFormat: GPUTextureFormat, sh_deg: number, compressed: boolean */) {}
 
@@ -116,6 +120,9 @@ export class GaussianRenderer {
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ],
     });
+
+    // Instantiate radix sorter
+    r.sorter = await GPURSSorter.new(_device, _queue);
     r.preprocessPipeline = r.device.createComputePipeline({
       layout: r.device.createPipelineLayout({ bindGroupLayouts: [r.cBgLayout0, r.cBgLayout1, r.cBgLayout2, r.cBgLayout3] }),
       compute: { module: r.preprocessModule, entryPoint: "preprocess" },
@@ -145,17 +152,18 @@ export class GaussianRenderer {
 
     // Allocate preprocess buffers sized by num_points
     const n = pc.num_points >>> 0;
-    const splatStride = 4 * 4; // conservative placeholder; actual packed size is 4 u32 per Splat
+    // Splat has 5 x u32 fields => 20 bytes per element
+    const splatStride = 20;
     const points2DSize = n * splatStride;
     if (!this.points2DBuffer || this.points2DBuffer.size < points2DSize) {
-      this.points2DBuffer = this.device.createBuffer({ size: Math.max(points2DSize, 16), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      this.points2DBuffer = this.device.createBuffer({ size: points2DSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     }
     const u32Size = n * 4;
     if (!this.sortDepthsBuffer || this.sortDepthsBuffer.size < u32Size) {
-      this.sortDepthsBuffer = this.device.createBuffer({ size: Math.max(u32Size, 16), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      this.sortDepthsBuffer = this.device.createBuffer({ size: u32Size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     }
     if (!this.sortIndicesBuffer || this.sortIndicesBuffer.size < u32Size) {
-      this.sortIndicesBuffer = this.device.createBuffer({ size: Math.max(u32Size, 16), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      this.sortIndicesBuffer = this.device.createBuffer({ size: u32Size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     }
     // SortInfos (5 u32 -> pad to 32 bytes) and DispatchIndirect (3 u32 -> pad to 16 bytes)
     if (!this.sortInfosBuffer) {
@@ -167,10 +175,17 @@ export class GaussianRenderer {
 
     // Camera and render settings uniforms (caller should update via setters)
     if (!this.cameraUniformBuffer) {
-      this.cameraUniformBuffer = this.device.createBuffer({ size: 16 * 4 * 4 + 16 * 4 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); // over-alloc; we'll refine
+      // CameraUniforms size: 272 bytes (multiple of 16)
+      this.cameraUniformBuffer = this.device.createBuffer({ size: 272, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     }
     if (!this.renderSettingsBuffer) {
-      this.renderSettingsBuffer = this.device.createBuffer({ size: 16 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); // rough size
+      // RenderSettings size: 80 bytes (multiple of 16)
+      this.renderSettingsBuffer = this.device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    }
+
+    // Plan radix sort buffers (uses our existing depths/indices as keys/payload)
+    if (this.sorter && (!this.sortPlan || this.sortPlan.keys !== this.sortDepthsBuffer)) {
+      this.sortPlan = this.sorter.planBuffers(pc.num_points, this.sortDepthsBuffer!, this.sortIndicesBuffer!);
     }
 
     // Compute bind groups
