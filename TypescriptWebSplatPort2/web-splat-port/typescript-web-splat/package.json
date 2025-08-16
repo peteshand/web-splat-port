@@ -1,0 +1,34 @@
+{
+  "name": "typescript-web-splat",
+  "version": "0.1.0",
+  "description": "3D Gaussian Splatting Viewer - TypeScript Port",
+  "main": "dist/lib.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "serve": "http-server dist -p 8080",
+    "clean": "rm -rf dist"
+  },
+  "authors": [
+    "Simon Niedermayr",
+    "Josef Stumpfegger"
+  ],
+  "dependencies": {
+    "gl-matrix": "^3.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@webgpu/types": "^0.1.44",
+    "typescript": "^5.0.0",
+    "http-server": "^14.1.1"
+  },
+  "keywords": [
+    "3d",
+    "gaussian",
+    "splatting",
+    "webgpu",
+    "typescript"
+  ],
+  "license": "MIT"
+}

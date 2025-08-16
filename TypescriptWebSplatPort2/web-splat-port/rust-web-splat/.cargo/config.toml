@@ -1,0 +1,4 @@
+# Fix for getrandom WASM compilation issue
+# See: https://github.com/KeKsBoTer/web-splats/issues/30
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

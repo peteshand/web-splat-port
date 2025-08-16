@@ -1,0 +1,36 @@
+{
+    // Enable Turbo Mode so commands auto-run unless denied
+    "windsurf.cascadeTurboMode": true,
+
+    // Only block destructive commands
+    "windsurf.cascadeCommandsDenyList": [
+        "rm -rf /",
+        "rm -rf *",
+        "mkfs",
+        "dd",
+        "shutdown",
+        "reboot"
+    ],
+
+    // Allow common safe commands, adding flags to skip prompts
+    "windsurf.cascadeCommandsAllowList": [
+        "git ",
+        "npm install --yes",
+        "apt-get install -y",
+        "yarn",
+        "pnpm",
+        "apt-get install -y",
+        "apt install -y",
+        "brew install",
+        "brew upgrade",
+        "code",
+        "python",
+        "pip install -y",
+        "node",
+        "ls",
+        "cd",
+        "pwd",
+        "cat",
+        "echo"
+    ]
+}

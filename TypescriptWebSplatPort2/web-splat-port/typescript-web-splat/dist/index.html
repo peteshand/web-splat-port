@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSplat TypeScript Port</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background: #1a1a1a;
+            color: white;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .controls {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        
+        .file-input {
+            margin: 10px 0;
+        }
+        
+        .file-input input[type="file"] {
+            padding: 8px;
+            background: #3a3a3a;
+            border: 1px solid #555;
+            border-radius: 4px;
+            color: white;
+        }
+        
+        .file-input button {
+            padding: 8px 16px;
+            background: #007acc;
+            border: none;
+            border-radius: 4px;
+            color: white;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        
+        .file-input button:hover {
+            background: #005a9e;
+        }
+        
+        .status {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-family: monospace;
+        }
+        
+        .canvas-container {
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        canvas {
+            display: block;
+            width: 100%;
+            height: 600px;
+        }
+        
+        .quick-load {
+            margin: 10px 0;
+        }
+        
+        .quick-load button {
+            padding: 8px 16px;
+            background: #28a745;
+            border: none;
+            border-radius: 4px;
+            color: white;
+            cursor: pointer;
+        }
+        
+        .quick-load button:hover {
+            background: #218838;
+        }
+    </style>
+    <!-- Import map to resolve bare module specifiers in the browser -->
+    <script type="importmap">
+      {
+        "imports": {
+          "gl-matrix": "https://esm.sh/gl-matrix@3.4.3"
+        }
+      }
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1>WebSplat TypeScript Port</h1>
+        
+        <div class="controls">
+            <h3>Load Point Cloud</h3>
+            
+            <div class="quick-load">
+                <button onclick="loadSamplePly()">Load Sample.ply</button>
+                <span style="margin-left: 10px; color: #888;">Quick load the included sample file</span>
+            </div>
+            
+            <div class="file-input">
+                <input type="file" id="fileInput" accept=".ply,.npz" />
+                <button onclick="loadSelectedFile()">Load File</button>
+            </div>
+            
+            <div class="file-input">
+                <label>
+                    Load from URL: 
+                    <input type="text" id="urlInput" placeholder="https://example.com/pointcloud.ply" 
+                           style="width: 300px; padding: 4px; margin-left: 10px;" />
+                </label>
+                <button onclick="loadFromUrl()">Load URL</button>
+            </div>
+        </div>
+        
+        <div class="status" id="status">
+            Ready to load point cloud data...
+        </div>
+        
+        <div class="canvas-container">
+            <canvas id="canvas" width="1200" height="600"></canvas>
+        </div>
+    </div>
+
+    <script type="module">
+        import { GenericGaussianPointCloud } from './io/mod.js';
+        import { GaussianRenderer } from './renderer.js';
+        import { PointCloud } from './pointcloud.js';
+        import { PerspectiveCamera } from './camera.js';
+
+        window.loadSamplePly = async function() {
+        console.log('load');
+            updateStatus('Loading Sample.ply...');
+            try {
+                const response = await fetch('./Sample.ply');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const arrayBuffer = await response.arrayBuffer();
+                updateStatus(`Loaded ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB. Parsing PLY data...`);
+                
+                const pointCloud = await GenericGaussianPointCloud.load(arrayBuffer);
+                updateStatus(`✅ Successfully loaded Sample.ply!`);
+                displayPointCloudInfo(pointCloud);
+                try {
+                    await setupRenderer(pointCloud);
+                } catch (e) {
+                    console.error('Renderer setup failed:', e);
+                    updateStatus(`⚠️ Renderer setup failed: ${e.message}`);
+                }
+                
+            } catch (error) {
+                updateStatus(`❌ Error loading Sample.ply: ${error.message}`);
+                console.error('Load error:', error);
+            }
+        };
+        
+        window.loadSelectedFile = async function() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                updateStatus('Please select a file first.');
+                return;
+            }
+            
+            updateStatus(`Loading ${file.name}...`);
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                updateStatus(`Loaded ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB. Parsing data...`);
+                
+                const pointCloud = await GenericGaussianPointCloud.load(arrayBuffer);
+                updateStatus(`✅ Successfully loaded ${file.name}!`);
+                displayPointCloudInfo(pointCloud);
+                try {
+                    await setupRenderer(pointCloud);
+                } catch (e) {
+                    console.error('Renderer setup failed:', e);
+                    updateStatus(`⚠️ Renderer setup failed: ${e.message}`);
+                }
+                
+            } catch (error) {
+                updateStatus(`❌ Error loading ${file.name}: ${error.message}`);
+                console.error('Load error:', error);
+            }
+        };
+        
+        window.loadFromUrl = async function() {
+            const urlInput = document.getElementById('urlInput');
+            const url = urlInput.value.trim();
+            
+            if (!url) {
+                updateStatus('Please enter a URL first.');
+                return;
+            }
+            
+            updateStatus(`Loading from ${url}...`);
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const arrayBuffer = await response.arrayBuffer();
+                updateStatus(`Downloaded ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB. Parsing data...`);
+                
+                const pointCloud = await GenericGaussianPointCloud.load(arrayBuffer);
+                updateStatus(`✅ Successfully loaded from URL!`);
+                displayPointCloudInfo(pointCloud);
+                try {
+                    await setupRenderer(pointCloud);
+                } catch (e) {
+                    console.error('Renderer setup failed:', e);
+                    updateStatus(`⚠️ Renderer setup failed: ${e.message}`);
+                }
+                
+            } catch (error) {
+                updateStatus(`❌ Error loading from URL: ${error.message}`);
+                console.error('Load error:', error);
+            }
+        };
+        
+        function displayPointCloudInfo(pointCloud) {
+            // Write info into the status panel to avoid creating a 2D context on the WebGPU canvas
+            const lines = [];
+            lines.push('Point Cloud Information:');
+            lines.push('');
+            lines.push(`📊 Number of Points: ${pointCloud.numPoints.toLocaleString()}`);
+            lines.push(`🎨 SH Degree: ${pointCloud.shDeg}`);
+            lines.push(`📦 Compressed: ${pointCloud.compressed ? 'Yes' : 'No'}`);
+            lines.push('');
+            lines.push(`📍 Center: (${pointCloud.center.x.toFixed(2)}, ${pointCloud.center.y.toFixed(2)}, ${pointCloud.center.z.toFixed(2)})`);
+            lines.push('📏 Bounding Box:');
+            lines.push(`   Min: (${pointCloud.aabb.min.x.toFixed(2)}, ${pointCloud.aabb.min.y.toFixed(2)}, ${pointCloud.aabb.min.z.toFixed(2)})`);
+            lines.push(`   Max: (${pointCloud.aabb.max.x.toFixed(2)}, ${pointCloud.aabb.max.y.toFixed(2)}, ${pointCloud.aabb.max.z.toFixed(2)})`);
+            lines.push('');
+            if (pointCloud.gaussians) lines.push(`💾 Gaussian Buffer: ${(pointCloud.gaussians.length / 1024).toFixed(1)} KB`);
+            if (pointCloud.shCoefs) lines.push(`🌈 SH Coefficients: ${(pointCloud.shCoefs.length / 1024).toFixed(1)} KB`);
+            if (pointCloud.kernelSize) lines.push(`🔍 Kernel Size: ${pointCloud.kernelSize}`);
+            if (pointCloud.mipSplatting !== undefined) lines.push(`🔄 Mip Splatting: ${pointCloud.mipSplatting ? 'Enabled' : 'Disabled'}`);
+            if (pointCloud.backgroundColor) lines.push(`🎨 Background: RGB(${pointCloud.backgroundColor.map(c => Math.round(c * 255)).join(', ')})`);
+
+            const status = document.getElementById('status');
+            status.textContent = `[${new Date().toLocaleTimeString()}]` + '\n' + lines.join('\n');
+            console.log(lines.join('\n'));
+        }
+        
+        function updateStatus(message) {
+            const status = document.getElementById('status');
+            status.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            console.log(message);
+        }
+
+        async function setupRenderer(pointCloud) {
+            const canvas = document.getElementById('canvas');
+            if (!('gpu' in navigator)) {
+                throw new Error('WebGPU not supported in this browser');
+            }
+
+            const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+            if (!adapter) throw new Error('No WebGPU adapter');
+            const device = await adapter.requestDevice({});
+            // Try standard and legacy context IDs
+            const context = (canvas.getContext('webgpu') || canvas.getContext('gpupresent'));
+            if (!context) {
+                const origin = location.origin;
+                const hint = `Origin: ${origin}. navigator.gpu: ${'gpu' in navigator}. Adapter: ${adapter ? 'ok' : 'none'}`;
+                throw new Error(`Failed to get WebGPU canvas context. Serve over http(s) (not file://), use a WebGPU-enabled browser, and ensure flags are enabled if needed. ${hint}`);
+            }
+
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format, alphaMode: 'opaque' });
+
+            // Upload point cloud to GPU
+            const pcGpu = new PointCloud(device, pointCloud);
+
+            // Create renderer
+            const renderer = await GaussianRenderer.create(
+                device,
+                device.queue,
+                format,
+                pointCloud.shDeg,
+                pointCloud.compressed
+            );
+
+            // Create a basic camera and set near/far planes to fit the cloud
+            const camera = PerspectiveCamera.createDefault();
+            camera.fitNearFar(pointCloud.aabb);
+
+            // Render loop
+            function frame(ts) {
+                const encoder = device.createCommandEncoder();
+
+                // Prepare (preprocess + sorting stub)
+                const viewport = [canvas.width, canvas.height];
+                const renderSettings = {
+                    camera,
+                    viewport,
+                    walltime: ts * 0.001,
+                    gaussianScaling: 1.0,
+                    maxShDeg: pointCloud.shDeg,
+                    showEnvMap: false,
+                    clippingBox: pointCloud.aabb,
+                    sceneExtend: 1.0,
+                };
+                renderer.prepare(encoder, device, device.queue, pcGpu, renderSettings, null);
+
+                // Render to the canvas
+                const textureView = context.getCurrentTexture().createView();
+                const pass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: textureView,
+                        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        loadOp: 'clear',
+                        storeOp: 'store'
+                    }]
+                });
+                renderer.render(pass, pcGpu);
+                pass.end();
+
+                device.queue.submit([encoder.finish()]);
+                requestAnimationFrame(frame);
+            }
+
+            requestAnimationFrame(frame);
+            updateStatus('WebGPU renderer initialized.');
+        }
+        
+        // Auto-load sample on page load for convenience
+        window.addEventListener('load', () => {
+            updateStatus('Page loaded. Click "Load Sample.ply" to test with the included sample file.');
+        });
+    </script>
+</body>
+</html>
