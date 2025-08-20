@@ -1,10 +1,9 @@
-/**
- * TypeScript port of utils.rs
- * Utility functions and classes for GPU operations and data management
- */
+// utils.ts
+// 1-for-1 port of utils.rs utilities used by the renderer.
 import { mat3 } from 'gl-matrix';
-export function keyToNum(key) {
-    switch (key) {
+/** Map KeyboardEvent.code like "Digit3" -> 3, otherwise null */
+export function key_to_num(code) {
+    switch (code) {
         case 'Digit0': return 0;
         case 'Digit1': return 1;
         case 'Digit2': return 2;
@@ -18,152 +17,193 @@ export function keyToNum(key) {
         default: return null;
     }
 }
+/**
+ * GPUStopwatch — mirrors the Rust struct/methods:
+ * fields: query_set, query_buffer, query_set_capacity, index, labels
+ * methods: new(..), start(..), stop(..), end(..), reset(), take_measurements(..)
+ *
+ * NOTE: WebGPU timestamp queries may be unavailable; in that case this class
+ * degrades to no-ops and returns empty results.
+ */
 export class GPUStopwatch {
-    querySet;
-    queryBuffer;
-    querySetCapacity;
-    index;
+    // --- fields (same names as Rust) ---
+    query_set;
+    query_buffer;
+    query_set_capacity; // total query slots (pairs * 2)
+    index; // pair index (start/stop)
     labels;
+    // Web: browsers don’t expose a timestamp period like wgpu; assume ns ticks.
+    timestamp_period_ns = 1;
+    // Rust: GPUStopwatch::new(device, capacity)
+    static new(device, capacity) {
+        return new GPUStopwatch(device, capacity);
+    }
     constructor(device, capacity) {
-        this.querySetCapacity = capacity || Math.floor(8192 / 2); // WebGPU max queries / 2
-        this.querySet = device.createQuerySet({
-            label: "time stamp query set",
-            type: "timestamp",
-            count: this.querySetCapacity * 2
-        });
-        this.queryBuffer = device.createBuffer({
-            label: "query set buffer",
-            size: this.querySetCapacity * 2 * 8, // 8 bytes per u64
-            usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
-            mappedAtCreation: false
-        });
+        const pairs = Math.max(1, capacity ?? (8192 >> 1)); // default like Rust comment
+        this.query_set_capacity = pairs * 2;
+        this.index = 0;
         this.labels = new Map();
-        this.index = 0;
-    }
-    start(encoder, label) {
-        if (this.labels.has(label)) {
+        let qs = null;
+        let qb = null;
+        try {
+            qs = device.createQuerySet({
+                label: 'time stamp query set',
+                type: 'timestamp',
+                count: this.query_set_capacity,
+            });
+            qb = device.createBuffer({
+                label: 'query set buffer',
+                size: this.query_set_capacity * 8, // u64 per timestamp
+                usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+            });
         }
-        // WebGPU timestamp queries require the 'timestamp-query' feature
-        // For now, we'll use a placeholder implementation
+        catch {
+            // Feature not supported in current environment.
+            qs = null;
+            qb = null;
+        }
+        this.query_set = qs;
+        this.query_buffer = qb;
     }
+    // Rust: start(&mut self, encoder, label) -> Result<(), String>
+    start(encoder, label) {
+        if (!this.query_set)
+            return;
+        if (this.labels.has(label)) {
+            throw new Error('cannot start measurement for same label twice');
+        }
+        if (this.labels.size * 2 >= this.query_set_capacity) {
+            throw new Error(`query set capacity (${this.query_set_capacity})reached`);
+        }
+        this.labels.set(label, this.index);
+        // write start timestamp at slot (index*2)
+        encoder.writeTimestamp?.(this.query_set, this.index * 2);
+        this.index += 1;
+    }
+    // Rust: stop(&mut self, encoder, label) -> Result<(), String>
     stop(encoder, label) {
-        const idx = label ? this.labels.get(label) || this.index : this.index;
-        // WebGPU timestamp queries require the 'timestamp-query' feature
-        // For now, we'll use a placeholder implementation
-        this.index = (this.index + 1) % this.querySetCapacity;
+        if (!this.query_set)
+            return;
+        const idx = this.labels.get(label);
+        if (idx === undefined) {
+            throw new Error(`start was not yet called for label ${label}`);
+        }
+        // write stop timestamp at slot (idx*2+1)
+        encoder.writeTimestamp?.(this.query_set, idx * 2 + 1);
     }
+    // Rust: end(&mut self, encoder)
     end(encoder) {
-        encoder.resolveQuerySet(this.querySet, 0, this.querySetCapacity, this.queryBuffer, 0);
+        if (!this.query_set || !this.query_buffer)
+            return;
+        encoder.resolveQuerySet(this.query_set, 0, this.query_set_capacity, this.query_buffer, 0);
         this.index = 0;
     }
+    // Rust: reset(&mut self)
     reset() {
         this.labels.clear();
     }
-    async takeMeasurements(device, queue) {
-        // Create staging buffer for reading results
-        const stagingBuffer = device.createBuffer({
-            size: this.queryBuffer.size,
-            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-        });
-        // Copy query results to staging buffer
-        const encoder = device.createCommandEncoder();
-        encoder.copyBufferToBuffer(this.queryBuffer, 0, stagingBuffer, 0, this.queryBuffer.size);
-        queue.submit([encoder.finish()]);
-        // Read the results
-        await stagingBuffer.mapAsync(GPUMapMode.READ);
-        const arrayBuffer = stagingBuffer.getMappedRange();
-        const timestamps = new BigUint64Array(arrayBuffer);
-        const durations = new Map();
-        const labelEntries = Array.from(this.labels.entries());
-        for (const [label, index] of labelEntries) {
-            const startTime = timestamps[index * 2];
-            const endTime = timestamps[index * 2 + 1];
-            const diffTicks = Number(endTime - startTime);
-            // Convert to milliseconds (timestamps are in nanoseconds)
-            const diffTimeMs = diffTicks / 1_000_000;
-            durations.set(label, diffTimeMs);
-        }
-        stagingBuffer.unmap();
-        stagingBuffer.destroy();
+    // Rust: take_measurements(&mut self, device, queue) -> HashMap<String, Duration>
+    // TS: returns Map<label, duration_ms>
+    async take_measurements(device, queue) {
+        const out = new Map();
+        if (!this.query_buffer)
+            return out;
+        // Drain labels like Rust (labels.drain()).
+        const labels = Array.from(this.labels.entries());
         this.labels.clear();
-        return durations;
-    }
-}
-export class RingBuffer {
-    index;
-    size;
-    container;
-    constructor(capacity) {
-        this.index = 0;
-        this.size = 0;
-        this.container = new Array(capacity);
-    }
-    push(item) {
-        this.container[this.index] = item;
-        this.index = (this.index + 1) % this.container.length;
-        this.size = Math.min(this.size + 1, this.container.length);
-    }
-    toArray() {
-        const start = this.index >= this.size
-            ? this.index - this.size
-            : this.container.length - (this.size - this.index);
-        const result = [];
-        for (let i = 0; i < this.size; i++) {
-            const idx = (start + i) % this.container.length;
-            const item = this.container[idx];
-            if (item !== undefined) {
-                result.push(item);
+        // Read back the whole buffer (like Rust resolves the whole capacity).
+        const byteSize = this.query_set_capacity * 8;
+        const staging = device.createBuffer({
+            size: byteSize,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        const enc = device.createCommandEncoder({ label: 'GPUStopwatch readback' });
+        enc.copyBufferToBuffer(this.query_buffer, 0, staging, 0, byteSize);
+        queue.submit([enc.finish()]);
+        await staging.mapAsync(GPUMapMode.READ);
+        const data = staging.getMappedRange();
+        const timestamps = new BigUint64Array(data);
+        for (const [label, index] of labels) {
+            const start = timestamps[index * 2];
+            const stop = timestamps[index * 2 + 1];
+            if (stop > start) {
+                // Treat ticks as ns; convert to ms to align with Duration-ish readouts
+                const diff_ns = stop - start;
+                const ms = Number(diff_ns) / 1_000_000 / this.timestamp_period_ns;
+                out.set(label, ms);
             }
         }
-        return result;
+        staging.unmap();
+        staging.destroy();
+        return out;
     }
 }
-export function shNumCoefficients(shDeg) {
-    return (shDeg + 1) * (shDeg + 1);
+/** Simple ring buffer used for fixed-size rolling statistics, etc. */
+export class RingBuffer {
+    index = 0;
+    size = 0;
+    store;
+    constructor(capacity) {
+        this.store = new Array(Math.max(1, capacity));
+    }
+    push(item) {
+        this.store[this.index] = item;
+        this.index = (this.index + 1) % this.store.length;
+        this.size = Math.min(this.size + 1, this.store.length);
+    }
+    to_array() {
+        const out = [];
+        if (this.size === 0)
+            return out;
+        const start = (this.index - this.size + this.store.length) % this.store.length;
+        for (let i = 0; i < this.size; i++) {
+            const v = this.store[(start + i) % this.store.length];
+            if (v !== undefined)
+                out.push(v);
+        }
+        return out;
+    }
 }
-export function shDegFromNumCoefs(n) {
+/** Number of SH coefficients for degree `sh_deg` ( (n+1)^2 ). */
+export function sh_num_coefficients(sh_deg) {
+    return (sh_deg + 1) * (sh_deg + 1);
+}
+/** Inverse of sh_num_coefficients: returns degree if n is a perfect square; else null. */
+export function sh_deg_from_num_coefs(n) {
     const sqrt = Math.sqrt(n);
-    if (sqrt !== Math.floor(sqrt)) {
-        return null;
-    }
-    return sqrt - 1;
+    return Number.isInteger(sqrt) ? (sqrt | 0) - 1 : null;
 }
 /**
- * Builds a covariance matrix based on a quaternion and scale
- * The matrix is symmetric so we only return the upper right half
- * See "3D Gaussian Splatting" Kerbl et al.
+ * Build the symmetric covariance (upper-triangular packed: m00,m01,m02,m11,m12,m22)
+ * from rotation (unit quaternion) and axis scales.
+ * Matches Kerbl et al. “3D Gaussian Splatting …”
  */
-export function buildCov(rotation, scale) {
-    // Convert quaternion to rotation matrix
-    const r = mat3.create();
-    mat3.fromQuat(r, rotation);
-    // Create scale matrix
-    const s = mat3.create();
-    mat3.fromScaling(s, scale);
+export function build_cov(rotation, scale) {
+    // R from quaternion
+    const R = mat3.create();
+    mat3.fromQuat(R, rotation);
+    // S diagonal
+    const S = mat3.create();
+    mat3.fromScaling(S, scale);
     // L = R * S
-    const l = mat3.create();
-    mat3.multiply(l, r, s);
+    const L = mat3.create();
+    mat3.multiply(L, R, S);
     // M = L * L^T
-    const lTranspose = mat3.create();
-    mat3.transpose(lTranspose, l);
-    const m = mat3.create();
-    mat3.multiply(m, l, lTranspose);
-    // Return upper triangular part: [m00, m01, m02, m11, m12, m22]
-    return [
-        m[0], m[1], m[2], // m00, m01, m02
-        m[4], m[5], // m11, m12
-        m[8] // m22
-    ];
+    const Lt = mat3.create();
+    mat3.transpose(Lt, L);
+    const M = mat3.create();
+    mat3.multiply(M, L, Lt);
+    // return upper triangular
+    return [M[0], M[1], M[2], M[4], M[5], M[8]];
 }
-/**
- * Numerically stable sigmoid function
- */
+/** Numerically stable sigmoid */
 export function sigmoid(x) {
-    if (x >= 0) {
-        return 1 / (1 + Math.exp(-x));
-    }
-    else {
-        return Math.exp(x) / (1 + Math.exp(x));
-    }
+    return x >= 0 ? 1 / (1 + Math.exp(-x)) : Math.exp(x) / (1 + Math.exp(x));
 }
+/* -------------------------------------------------------------------------- */
+/*                    camelCase aliases (for mixed imports)                    */
+/* -------------------------------------------------------------------------- */
+export const buildCov = build_cov;
+export const shDegFromNumCoefs = sh_deg_from_num_coefs;
+export const shNumCoefficients = sh_num_coefficients;
 //# sourceMappingURL=utils.js.map

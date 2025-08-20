@@ -1,757 +1,606 @@
-/*
-    This file implements a gpu version of radix sort. A good introduction to general purpose radix sort can
-    be found here: http://www.codercorner.com/RadixSortRevisited.htm
+// gpu_rs.ts
+//
+// 1:1 port of gpu_rs.rs (WebGPU radix sort for float key-value pairs)
+// - Same public API surface (GPURSSorter, PointCloudSortStuff, constants)
+// - Same bind group layouts & binding indices
+// - Loads shaders from ./shaders/radix_sort.wgsl with injected constants
 
-    The gpu radix sort implemented here is a reimplementation of the vulkan radix sort found in the fuchsia repos: https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/src/graphics/lib/compute/radix_sort/
-    Currently only the sorting for floating point key-value pairs is implemented, as only this is needed for this project
+// ===== Constants (must match shaders/radix_sort.wgsl) =====
+export const HISTOGRAM_WG_SIZE = 256;
+const RS_RADIX_LOG2 = 8;
+const RS_RADIX_SIZE = 1 << RS_RADIX_LOG2;
+const RS_KEYVAL_SIZE = 32 / RS_RADIX_LOG2;       // 32 bits / 8 = 4 passes
+export const RS_HISTOGRAM_BLOCK_ROWS = 15;
+const RS_SCATTER_BLOCK_ROWS = RS_HISTOGRAM_BLOCK_ROWS; // DO NOT CHANGE (shader assumes)
+const PREFIX_WG_SIZE = 1 << 7;                   // 128
+const SCATTER_WG_SIZE = 1 << 8;                  // 256
 
-    All shaders can be found in shaders/radix_sort.wgsl
-*/
+// ===== Types matching Rust structs =====
+export interface PointCloudSortStuff {
+  numPoints: number;
+  sorterUni: GPUBuffer;         // "uniform" storage buffer with GeneralInfo
+  sorterDis: GPUBuffer;         // indirect dispatch buffer (IndirectDispatch)
+  sorterBg: GPUBindGroup;       // radix sort main bind group (6 bindings)
+  sorterRenderBg: GPUBindGroup; // render bind group (indices etc.)
+  sorterBgPre: GPUBindGroup;    // preprocess bind group (merged layout for preprocess step)
+}
 
-// IMPORTANT: the following constants have to be synced with the numbers in radix_sort.wgsl
-export const HISTOGRAM_WG_SIZE: number = 256;
-const RS_RADIX_LOG2: number = 8; // 8 bit radices
-const RS_RADIX_SIZE: number = 1 << RS_RADIX_LOG2; // 256 entries into the radix table
-const RS_KEYVAL_SIZE: number = 32 / RS_RADIX_LOG2;
-export const RS_HISTOGRAM_BLOCK_ROWS: number = 15;
-const RS_SCATTER_BLOCK_ROWS: number = RS_HISTOGRAM_BLOCK_ROWS; // DO NOT CHANGE, shader assume this!!!
-const PREFIX_WG_SIZE: number = 1 << 7; // one thread operates on 2 prefixes at the same time
-const SCATTER_WG_SIZE: number = 1 << 8;
+// GeneralInfo (5 x u32) — stored in a STORAGE buffer
+type GeneralInfo = {
+  keys_size: number;   // u32
+  padded_size: number; // u32
+  passes: number;      // u32
+  even_pass: number;   // u32
+  odd_pass: number;    // u32
+};
 
+// IndirectDispatch (3 x u32)
+type IndirectDispatch = {
+  dispatch_x: number;
+  dispatch_y: number;
+  dispatch_z: number;
+};
+
+// ===== Utility to write small structs =====
+function writeGeneralInfo(info: GeneralInfo): Uint8Array {
+  const buf = new ArrayBuffer(20);
+  const dv = new DataView(buf);
+  dv.setUint32(0, info.keys_size >>> 0, true);
+  dv.setUint32(4, info.padded_size >>> 0, true);
+  dv.setUint32(8, info.passes >>> 0, true);
+  dv.setUint32(12, info.even_pass >>> 0, true);
+  dv.setUint32(16, info.odd_pass >>> 0, true);
+  return new Uint8Array(buf);
+}
+
+function writeIndirectDispatch(id: IndirectDispatch): Uint8Array {
+  const buf = new ArrayBuffer(12);
+  const dv = new DataView(buf);
+  dv.setUint32(0, id.dispatch_x >>> 0, true);
+  dv.setUint32(4, id.dispatch_y >>> 0, true);
+  dv.setUint32(8, id.dispatch_z >>> 0, true);
+  return new Uint8Array(buf);
+}
+
+// ===== GPURSSorter =====
 export class GPURSSorter {
-    bindGroupLayout: GPUBindGroupLayout;
-    renderBindGroupLayout: GPUBindGroupLayout;
-    preprocessBindGroupLayout: GPUBindGroupLayout;
-    zeroP: GPUComputePipeline;
-    histogramP: GPUComputePipeline;
-    prefixP: GPUComputePipeline;
-    scatterEvenP: GPUComputePipeline;
-    scatterOddP: GPUComputePipeline;
-    subgroupSize: number;
+  private bind_group_layout!: GPUBindGroupLayout;        // full radix layout (6 bindings)
+  private render_bind_group_layout!: GPUBindGroupLayout; // render layout (bindings 0,4)
+  private preprocess_bind_group_layout!: GPUBindGroupLayout; // preprocess layout (bindings 0..3)
 
-    constructor(
-        bindGroupLayout: GPUBindGroupLayout,
-        renderBindGroupLayout: GPUBindGroupLayout,
-        preprocessBindGroupLayout: GPUBindGroupLayout,
-        zeroP: GPUComputePipeline,
-        histogramP: GPUComputePipeline,
-        prefixP: GPUComputePipeline,
-        scatterEvenP: GPUComputePipeline,
-        scatterOddP: GPUComputePipeline,
-        subgroupSize: number
-    ) {
-        this.bindGroupLayout = bindGroupLayout;
-        this.renderBindGroupLayout = renderBindGroupLayout;
-        this.preprocessBindGroupLayout = preprocessBindGroupLayout;
-        this.zeroP = zeroP;
-        this.histogramP = histogramP;
-        this.prefixP = prefixP;
-        this.scatterEvenP = scatterEvenP;
-        this.scatterOddP = scatterOddP;
-        this.subgroupSize = subgroupSize;
+  private zero_p!: GPUComputePipeline;
+  private histogram_p!: GPUComputePipeline;
+  private prefix_p!: GPUComputePipeline;
+  private scatter_even_p!: GPUComputePipeline;
+  private scatter_odd_p!: GPUComputePipeline;
+
+  private subgroup_size!: number;
+
+  // ---- Creation entrypoint (mirrors async new(device, queue)) ----
+  static async create(device: GPUDevice, queue: GPUQueue): Promise<GPURSSorter> {
+    // WebGPU doesn’t expose subgroup size; do the same “probe” as Rust.
+    console.debug('Searching for the maximum subgroup size (browser WebGPU cannot query it).');
+    const sizes = [1, 8, 16, 32];
+    let curIdx = 2; // start at 16 like Rust does (cur_size = 2)
+    enum State { Init, Increasing, Decreasing }
+    let state: State = State.Init;
+    let biggestThatWorked = 0;
+    let curSorter: GPURSSorter | null = null;
+
+    while (true) {
+      if (curIdx >= sizes.length || curIdx < 0) break;
+      console.debug(`Checking sorting with subgroup size ${sizes[curIdx]}`);
+      const candidate = await GPURSSorter.newWithSgSize(device, sizes[curIdx]);
+      const ok = await candidate.test_sort(device, queue);
+      console.debug(`${sizes[curIdx]} worked: ${ok}`);
+      if (ok) curSorter = candidate;
+
+      switch (state) {
+        case State.Init:
+          if (ok) {
+            biggestThatWorked = sizes[curIdx];
+            state = State.Increasing;
+            curIdx += 1;
+          } else {
+            state = State.Decreasing;
+            curIdx -= 1;
+          }
+          break;
+        case State.Increasing:
+          if (ok) {
+            if (sizes[curIdx] > biggestThatWorked) biggestThatWorked = sizes[curIdx];
+            curIdx += 1;
+          } else {
+            // last ok is the best
+            break;
+          }
+          continue; // to break outer loop if needed
+        case State.Decreasing:
+          if (ok) {
+            if (sizes[curIdx] > biggestThatWorked) biggestThatWorked = sizes[curIdx];
+            break;
+          } else {
+            curIdx -= 1;
+          }
+          continue;
+      }
+      if (state === State.Increasing && (curIdx >= sizes.length)) break;
+      if (state === State.Decreasing && (curIdx < 0)) break;
     }
 
-    // The new call also needs the queue to be able to determine the maximum subgroup size (Does so by running test runs)
-    static async new(device: GPUDevice, queue: GPUQueue): Promise<GPURSSorter> {
-        let curSorter: GPURSSorter;
-
-        console.debug("Searching for the maximum subgroup size (wgpu currently does not allow to query subgroup sizes)");
-        const sizes = [1, 8, 16, 32];
-        let curSize = 2;
-        
-        enum State {
-            Init,
-            Increasing,
-            Decreasing,
-        }
-        
-        let biggestThatWorked = 0;
-        let s = State.Init;
-        
-        while (true) {
-            if (curSize >= sizes.length) {
-                break;
-            }
-            console.debug(`Checking sorting with subgroupsize ${sizes[curSize]}`);
-            curSorter = GPURSSorter.newWithSgSize(device, sizes[curSize]);
-            const sortSuccess = await curSorter.testSort(device, queue);
-            console.debug(`${sizes[curSize]} worked: ${sortSuccess}`);
-            
-            switch (s) {
-                case State.Init:
-                    if (sortSuccess) {
-                        biggestThatWorked = sizes[curSize];
-                        s = State.Increasing;
-                        curSize += 1;
-                    } else {
-                        s = State.Decreasing;
-                        curSize -= 1;
-                    }
-                    break;
-                case State.Increasing:
-                    if (sortSuccess) {
-                        if (sizes[curSize] > biggestThatWorked) {
-                            biggestThatWorked = sizes[curSize];
-                        }
-                        curSize += 1;
-                    } else {
-                        break;
-                    }
-                    break;
-                case State.Decreasing:
-                    if (sortSuccess) {
-                        if (sizes[curSize] > biggestThatWorked) {
-                            biggestThatWorked = sizes[curSize];
-                        }
-                        break;
-                    } else {
-                        curSize -= 1;
-                    }
-                    break;
-            }
-        }
-        
-        if (biggestThatWorked === 0) {
-            throw new Error("GPURSSorter::new() No workgroup size that works was found. Unable to use sorter");
-        }
-        
-        curSorter = GPURSSorter.newWithSgSize(device, biggestThatWorked);
-        console.info(`Created a sorter with subgroup size ${curSorter.subgroupSize}\n`);
-        return curSorter;
+    if (!curSorter || biggestThatWorked === 0) {
+      throw new Error('GPURSSorter.create(): No workgroup size worked. Unable to use sorter.');
     }
+    console.info(`Created a sorter with subgroup size ${curSorter.subgroup_size}`);
+    return curSorter;
+  }
 
-    createSortStuff(device: GPUDevice, numPoints: number): PointCloudSortStuff {
-        const [sorterBA, sorterBB, sorterPA, sorterPB] = GPURSSorter.createKeyvalBuffers(device, numPoints, 4);
-        const sorterInt = this.createInternalMemBuffer(device, numPoints);
-        const [sorterUni, sorterDis, sorterBg] = this.createBindGroup(
-            device,
-            numPoints,
-            sorterInt,
-            sorterBA,
-            sorterBB,
-            sorterPA,
-            sorterPB
-        );
-        const sorterRenderBg = this.createBindGroupRender(device, sorterUni, sorterPA);
-        const sorterBgPre = this.createBindGroupPreprocess(device, sorterUni, sorterDis, sorterBA, sorterPA);
+  // ---- Instance factory with a fixed subgroup size (mirrors new_with_sg_size) ----
+  private static async newWithSgSize(device: GPUDevice, sgSize: number): Promise<GPURSSorter> {
+    // compute various shared-memory sizes as in Rust
+    const histogram_sg_size = sgSize >>> 0;
+    const rs_sweep_0_size = RS_RADIX_SIZE / histogram_sg_size;
+    const rs_sweep_1_size = Math.floor(rs_sweep_0_size / histogram_sg_size);
+    const rs_sweep_2_size = Math.floor(rs_sweep_1_size / histogram_sg_size);
+    const rs_sweep_size = rs_sweep_0_size + rs_sweep_1_size + rs_sweep_2_size;
+    // phase 2 is the max
+    const rs_mem_phase_2 = RS_RADIX_SIZE + RS_SCATTER_BLOCK_ROWS * SCATTER_WG_SIZE;
+    const rs_mem_dwords = rs_mem_phase_2;
+    const rs_mem_sweep_0_offset = 0;
+    const rs_mem_sweep_1_offset = rs_mem_sweep_0_offset + rs_sweep_0_size;
+    const rs_mem_sweep_2_offset = rs_mem_sweep_1_offset + rs_sweep_1_size;
 
-        return new PointCloudSortStuff(
-            numPoints,
-            sorterUni,
-            sorterDis,
-            sorterBg,
-            sorterRenderBg,
-            sorterBgPre
-        );
-    }
+    const instance = new GPURSSorter();
+    instance.bind_group_layout = GPURSSorter.bindGroupLayouts(device);
+    instance.render_bind_group_layout = GPURSSorter.bindGroupLayoutRendering(device);
+    instance.preprocess_bind_group_layout = GPURSSorter.bindGroupLayoutPreprocess(device);
 
-    private static newWithSgSize(device: GPUDevice, sgSize: number): GPURSSorter {
-        // special variables for scatter shade
-        const histogramSgSize: number = sgSize;
-        const rsSweep0Size: number = RS_RADIX_SIZE / histogramSgSize;
-        const rsSweep1Size: number = rsSweep0Size / histogramSgSize;
-        const rsSweep2Size: number = rsSweep1Size / histogramSgSize;
-        const rsSweepSize: number = rsSweep0Size + rsSweep1Size + rsSweep2Size;
-        const _rsSmemPhase1: number = RS_RADIX_SIZE + RS_RADIX_SIZE + rsSweepSize;
-        const rsSmemPhase2: number = RS_RADIX_SIZE + RS_SCATTER_BLOCK_ROWS * SCATTER_WG_SIZE;
-        // rs_smem_phase_2 will always be larger, so always use phase2
-        const rsMemDwords: number = rsSmemPhase2;
-        const rsMemSweep0Offset: number = 0;
-        const rsMemSweep1Offset: number = rsMemSweep0Offset + rsSweep0Size;
-        const rsMemSweep2Offset: number = rsMemSweep1Offset + rsSweep1Size;
+    const pipeline_layout = device.createPipelineLayout({
+      label: 'radix sort pipeline layout',
+      bindGroupLayouts: [instance.bind_group_layout]
+    });
 
-        const bindGroupLayout = GPURSSorter.bindGroupLayouts(device);
-        const renderBindGroupLayout = GPURSSorter.bindGroupLayoutRendering(device);
-        const preprocessBindGroupLayout = GPURSSorter.bindGroupLayoutPreprocess(device);
-
-        const pipelineLayout: GPUPipelineLayout = device.createPipelineLayout({
-            label: "radix sort pipeline layout",
-            bindGroupLayouts: [bindGroupLayout],
-        });
-
-        // Load shader from file - in a real implementation, you'd load this from the actual file
-        const rawShader = `// Placeholder for radix_sort.wgsl content - should be loaded from file`;
-        const shaderWConst = `const histogram_sg_size: u32 = ${histogramSgSize}u;
+    // Load shader and inject constants header + placeholder replacements
+    const raw = await (await fetch('./shaders/radix_sort.wgsl')).text();
+    const header =
+      `const histogram_sg_size: u32 = ${histogram_sg_size}u;
 const histogram_wg_size: u32 = ${HISTOGRAM_WG_SIZE}u;
 const rs_radix_log2: u32 = ${RS_RADIX_LOG2}u;
 const rs_radix_size: u32 = ${RS_RADIX_SIZE}u;
 const rs_keyval_size: u32 = ${RS_KEYVAL_SIZE}u;
 const rs_histogram_block_rows: u32 = ${RS_HISTOGRAM_BLOCK_ROWS}u;
 const rs_scatter_block_rows: u32 = ${RS_SCATTER_BLOCK_ROWS}u;
-const rs_mem_dwords: u32 = ${rsMemDwords}u;
-const rs_mem_sweep_0_offset: u32 = ${rsMemSweep0Offset}u;
-const rs_mem_sweep_1_offset: u32 = ${rsMemSweep1Offset}u;
-const rs_mem_sweep_2_offset: u32 = ${rsMemSweep2Offset}u;
-${rawShader}`;
+const rs_mem_dwords: u32 = ${rs_mem_dwords}u;
+const rs_mem_sweep_0_offset: u32 = ${rs_mem_sweep_0_offset}u;
+const rs_mem_sweep_1_offset: u32 = ${rs_mem_sweep_1_offset}u;
+const rs_mem_sweep_2_offset: u32 = ${rs_mem_sweep_2_offset}u;
+`;
+    // Replace the {histogram_wg_size}, {prefix_wg_size}, {scatter_wg_size} placeholders
+    const shader_code = (header + raw)
+      .replaceAll('{histogram_wg_size}', String(HISTOGRAM_WG_SIZE))
+      .replaceAll('{prefix_wg_size}', String(PREFIX_WG_SIZE))
+      .replaceAll('{scatter_wg_size}', String(SCATTER_WG_SIZE));
 
-        const shaderCode = shaderWConst
-            .replace(/{histogram_wg_size}/g, HISTOGRAM_WG_SIZE.toString())
-            .replace(/{prefix_wg_size}/g, PREFIX_WG_SIZE.toString())
-            .replace(/{scatter_wg_size}/g, SCATTER_WG_SIZE.toString());
+    const shader = device.createShaderModule({ label: 'Radix sort shader', code: shader_code });
 
-        const shader = device.createShaderModule({
-            label: "Radix sort shader",
-            code: shaderCode,
-        });
+    instance.zero_p = device.createComputePipeline({
+      label: 'Zero the histograms',
+      layout: pipeline_layout,
+      compute: { module: shader, entryPoint: 'zero_histograms' }
+    });
+    instance.histogram_p = device.createComputePipeline({
+      label: 'calculate_histogram',
+      layout: pipeline_layout,
+      compute: { module: shader, entryPoint: 'calculate_histogram' }
+    });
+    instance.prefix_p = device.createComputePipeline({
+      label: 'prefix_histogram',
+      layout: pipeline_layout,
+      compute: { module: shader, entryPoint: 'prefix_histogram' }
+    });
+    instance.scatter_even_p = device.createComputePipeline({
+      label: 'scatter_even',
+      layout: pipeline_layout,
+      compute: { module: shader, entryPoint: 'scatter_even' }
+    });
+    instance.scatter_odd_p = device.createComputePipeline({
+      label: 'scatter_odd',
+      layout: pipeline_layout,
+      compute: { module: shader, entryPoint: 'scatter_odd' }
+    });
 
-        const zeroP = device.createComputePipeline({
-            label: "Zero the histograms",
-            layout: pipelineLayout,
-            compute: {
-                module: shader,
-                entryPoint: "zero_histograms",
-            },
-        });
+    instance.subgroup_size = histogram_sg_size;
+    return instance;
+  }
 
-        const histogramP = device.createComputePipeline({
-            label: "calculate_histogram",
-            layout: pipelineLayout,
-            compute: {
-                module: shader,
-                entryPoint: "calculate_histogram",
-            },
-        });
+  // ---- Public layout helpers (associated functions in Rust) ----
+  static bindGroupLayouts(device: GPUDevice): GPUBindGroupLayout {
+    return device.createBindGroupLayout({
+      label: 'Radix bind group layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }, // general infos
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }, // internal mem
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }, // keyval_a
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }, // keyval_b
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }, // payload_a
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }, // payload_b
+      ]
+    });
+  }
 
-        const prefixP = device.createComputePipeline({
-            label: "prefix_histogram",
-            layout: pipelineLayout,
-            compute: {
-                module: shader,
-                entryPoint: "prefix_histogram",
-            },
-        });
+  static bindGroupLayoutPreprocess(device: GPUDevice): GPUBindGroupLayout {
+    return device.createBindGroupLayout({
+      label: 'Radix bind group layout for preprocess pipeline',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }, // general infos
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }, // keyval_a
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }, // payload_a
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }, // dispatch
+      ]
+    });
+  }
 
-        const scatterEvenP = device.createComputePipeline({
-            label: "scatter_even",
-            layout: pipelineLayout,
-            compute: {
-                module: shader,
-                entryPoint: "scatter_even",
-            },
-        });
+  static bindGroupLayoutRendering(device: GPUDevice): GPUBindGroupLayout {
+    return device.createBindGroupLayout({
+      label: 'Radix bind group layout (render)',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE | GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // general infos
+        { binding: 4, visibility: GPUShaderStage.COMPUTE | GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // payload_a (indices)
+      ]
+    });
+  }
 
-        const scatterOddP = device.createComputePipeline({
-            label: "scatter_odd",
-            layout: pipelineLayout,
-            compute: {
-                module: shader,
-                entryPoint: "scatter_odd",
-            },
-        });
+  // ---- Public API: allocate per-pointcloud resources (create_sort_stuff) ----
+  createSortStuff(device: GPUDevice, numPoints: number): PointCloudSortStuff {
+    const [keyval_a, keyval_b, payload_a, payload_b] = GPURSSorter.createKeyvalBuffers(device, numPoints, 4);
+    const sorter_int = this.createInternalMemBuffer(device, numPoints);
+    const [sorter_uni, sorter_dis, sorter_bg] = this.createBindGroup(
+      device, numPoints, sorter_int, keyval_a, keyval_b, payload_a, payload_b
+    );
+    const sorter_render_bg = this.createBindGroupRender(device, sorter_uni, payload_a);
+    const sorter_bg_pre = this.createBindGroupPreprocess(device, sorter_uni, sorter_dis, keyval_a, payload_a);
 
-        return new GPURSSorter(
-            bindGroupLayout,
-            renderBindGroupLayout,
-            preprocessBindGroupLayout,
-            zeroP,
-            histogramP,
-            prefixP,
-            scatterEvenP,
-            scatterOddP,
-            histogramSgSize
+    return {
+      numPoints,
+      sorterUni: sorter_uni,
+      sorterDis: sorter_dis,
+      sorterBg: sorter_bg,
+      sorterRenderBg: sorter_render_bg,
+      sorterBgPre: sorter_bg_pre,
+    };
+  }
+
+  // ---- Internal helpers from Rust ----
+  private static getScatterHistogramSizes(keysize: number): [number, number, number, number, number, number] {
+    const scatter_block_kvs = HISTOGRAM_WG_SIZE * RS_SCATTER_BLOCK_ROWS;
+    const scatter_blocks_ru = Math.floor((keysize + scatter_block_kvs - 1) / scatter_block_kvs);
+    const count_ru_scatter = scatter_blocks_ru * scatter_block_kvs;
+
+    const histo_block_kvs = HISTOGRAM_WG_SIZE * RS_HISTOGRAM_BLOCK_ROWS;
+    const histo_blocks_ru = Math.floor((count_ru_scatter + histo_block_kvs - 1) / histo_block_kvs);
+    const count_ru_histo = histo_blocks_ru * histo_block_kvs;
+
+    return [
+      scatter_block_kvs,
+      scatter_blocks_ru,
+      count_ru_scatter,
+      histo_block_kvs,
+      histo_blocks_ru,
+      count_ru_histo
+    ];
+  }
+
+  static createKeyvalBuffers(
+    device: GPUDevice,
+    keysize: number,
+    bytesPerPayloadElem: number
+  ): [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer] {
+    const keysPerWG = HISTOGRAM_WG_SIZE * RS_HISTOGRAM_BLOCK_ROWS;
+    const countRuHisto = (Math.floor((keysize + keysPerWG) / keysPerWG) + 1) * keysPerWG;
+
+    const keyBytes = countRuHisto * 4; // f32
+    const buffer_a = device.createBuffer({
+      label: 'Radix data buffer a',
+      size: keyBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    });
+    const buffer_b = device.createBuffer({
+      label: 'Radix data buffer b',
+      size: keyBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    });
+
+    if (bytesPerPayloadElem !== 4) throw new Error('Only 4-byte payload elements supported');
+    const payloadSize = Math.max(keysize * bytesPerPayloadElem, 1);
+    const payload_a = device.createBuffer({
+      label: 'Radix payload buffer a',
+      size: payloadSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    });
+    const payload_b = device.createBuffer({
+      label: 'Radix payload buffer b',
+      size: payloadSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    });
+    return [buffer_a, buffer_b, payload_a, payload_b];
+  }
+
+  createInternalMemBuffer(device: GPUDevice, keysize: number): GPUBuffer {
+    // Layout:
+    // histograms[keyval_size] |
+    // partitions[scatter_blocks_ru-1] |
+    // workgroup_ids[keyval_size]
+    // Size computed like Rust:
+    const [, scatter_blocks_ru] = GPURSSorter.getScatterHistogramSizes(keysize);
+    const histo_size = RS_RADIX_SIZE * 4; // u32
+    const internal_size = (RS_KEYVAL_SIZE + scatter_blocks_ru - 1 + 1) * histo_size;
+
+    return device.createBuffer({
+      label: 'Internal radix sort buffer',
+      size: internal_size,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    });
+  }
+
+  createBindGroup(
+    device: GPUDevice,
+    keysize: number,
+    internal_mem_buffer: GPUBuffer,
+    keyval_a: GPUBuffer,
+    keyval_b: GPUBuffer,
+    payload_a: GPUBuffer,
+    payload_b: GPUBuffer
+  ): [GPUBuffer, GPUBuffer, GPUBindGroup] {
+    const [, scatter_blocks_ru, , , , count_ru_histo] = GPURSSorter.getScatterHistogramSizes(keysize);
+
+    const dispatch_infos: IndirectDispatch = {
+      dispatch_x: scatter_blocks_ru >>> 0,
+      dispatch_y: 1,
+      dispatch_z: 1
+    };
+    const uniform_infos: GeneralInfo = {
+      keys_size: keysize >>> 0,
+      padded_size: count_ru_histo >>> 0,
+      passes: 4,
+      even_pass: 0,
+      odd_pass: 0
+    };
+
+    const uniform_buffer = device.createBuffer({
+      label: 'Radix uniform buffer',
+      size: 20,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    });
+
+    {
+        const bytes = writeGeneralInfo(uniform_infos);            // Uint8Array
+        device.queue.writeBuffer(
+          uniform_buffer,
+          0,
+          bytes.buffer as ArrayBuffer,                             // <-- pass ArrayBuffer
+          bytes.byteOffset,
+          bytes.byteLength
+        );
+      }
+
+    const dispatch_buffer = device.createBuffer({
+      label: 'Dispatch indirect buffer',
+      size: 12,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT
+    });
+    
+    {
+        const bytes = writeGeneralInfo(uniform_infos);            // or whatever function you call there
+        device.queue.writeBuffer(
+            dispatch_buffer,                                    // your buffer at 381
+          0,
+          bytes.buffer as ArrayBuffer,
+          bytes.byteOffset,
+          bytes.byteLength
         );
     }
 
-    private async testSort(device: GPUDevice, queue: GPUQueue): Promise<boolean> {
-        // simply runs a small sort and check if the sorting result is correct
-        const n = 8192; // means that 2 workgroups are needed for sorting
-        const scrambledData: Float32Array = new Float32Array(n);
-        const sortedData: Float32Array = new Float32Array(n);
-        
-        for (let i = 0; i < n; i++) {
-            scrambledData[i] = (n - 1 - i) as number;
-            sortedData[i] = i as number;
-        }
-
-        const internalMemBuffer = this.createInternalMemBuffer(device, n);
-        const [keyvalA, keyvalB, payloadA, payloadB] = GPURSSorter.createKeyvalBuffers(device, n, 4);
-        const [_uniformBuffer, _dispatchBuffer, bindGroup] = this.createBindGroup(
-            device,
-            n,
-            internalMemBuffer,
-            keyvalA,
-            keyvalB,
-            payloadA,
-            payloadB
-        );
-
-        uploadToBuffer(keyvalA, device, queue, scrambledData);
-
-        const encoder = device.createCommandEncoder({
-            label: "GPURSSorter test_sort",
-        });
-        this.recordSort(bindGroup, n, encoder);
-        const commandBuffer = encoder.finish();
-        queue.submit([commandBuffer]);
-        await device.queue.onSubmittedWorkDone();
-
-        const sorted = await downloadBuffer<number>(keyvalA, device, queue);
-        for (let i = 0; i < n; i++) {
-            if (sorted[i] !== sortedData[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    // layouts used by the sorting pipeline, as the dispatch buffer has to be in separate bind group
-    static bindGroupLayouts(device: GPUDevice): GPUBindGroupLayout {
-        return device.createBindGroupLayout({
-            label: "Radix bind group layout",
-            entries: [
-                {
-                    binding: 0,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "storage" as GPUBufferBindingType },
-                },
-                {
-                    binding: 1,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "storage" as GPUBufferBindingType },
-                },
-                {
-                    binding: 2,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "storage" as GPUBufferBindingType },
-                },
-                {
-                    binding: 3,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "storage" as GPUBufferBindingType },
-                },
-                {
-                    binding: 4,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "storage" as GPUBufferBindingType },
-                },
-                {
-                    binding: 5,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "storage" as GPUBufferBindingType },
-                },
-            ],
-        });
-    }
-
-    // is used by the preprocess pipeline as the limitation of bind groups forces us to only use 1 bind group for the sort infos
-    static bindGroupLayoutPreprocess(device: GPUDevice): GPUBindGroupLayout {
-        return device.createBindGroupLayout({
-            label: "Radix bind group layout for preprocess pipeline",
-            entries: [
-                {
-                    binding: 0,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "storage" as GPUBufferBindingType },
-                },
-                {
-                    binding: 1,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "storage" as GPUBufferBindingType },
-                },
-                {
-                    binding: 2,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "storage" as GPUBufferBindingType },
-                },
-                {
-                    binding: 3,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "storage" as GPUBufferBindingType },
-                },
-            ],
-        });
-    }
-
-    // used by the renderer, as read_only : false is not allowed without an extension
-    static bindGroupLayoutRendering(device: GPUDevice): GPUBindGroupLayout {
-        return device.createBindGroupLayout({
-            label: "Radix bind group layout",
-            entries: [
-                {
-                    binding: 0,
-                    visibility: GPUShaderStage.COMPUTE | GPUShaderStage.VERTEX,
-                    buffer: { type: "read-only-storage" as GPUBufferBindingType },
-                },
-                {
-                    binding: 4,
-                    visibility: GPUShaderStage.COMPUTE | GPUShaderStage.VERTEX,
-                    buffer: { type: "read-only-storage" as GPUBufferBindingType },
-                },
-            ],
-        });
-    }
-
-    private static getScatterHistogramSizes(keysize: number): [number, number, number, number, number, number] {
-        const scatterBlockKvs = HISTOGRAM_WG_SIZE * RS_SCATTER_BLOCK_ROWS;
-        const scatterBlocksRu = Math.ceil(keysize / scatterBlockKvs);
-        const countRuScatter = scatterBlocksRu * scatterBlockKvs;
-
-        const histoBlockKvs = HISTOGRAM_WG_SIZE * RS_HISTOGRAM_BLOCK_ROWS;
-        const histoBlocksRu = Math.ceil(countRuScatter / histoBlockKvs);
-        const countRuHisto = histoBlocksRu * histoBlockKvs;
-
-        return [scatterBlockKvs, scatterBlocksRu, countRuScatter, histoBlockKvs, histoBlocksRu, countRuHisto];
-    }
-
-    static createKeyvalBuffers(
-        device: GPUDevice,
-        keysize: number,
-        bytesPerPayloadElem: number
-    ): [GPUBuffer, GPUBuffer, GPUBuffer, GPUBuffer] {
-        const keysPerWorkgroup = HISTOGRAM_WG_SIZE * RS_HISTOGRAM_BLOCK_ROWS;
-        const countRuHisto = Math.ceil((keysize + keysPerWorkgroup) / keysPerWorkgroup + 1) * keysPerWorkgroup;
-
-        const bufferA = device.createBuffer({
-            label: "Radix data buffer a",
-            size: countRuHisto * 4,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-        });
-
-        const bufferB = device.createBuffer({
-            label: "Radix data buffer b",
-            size: countRuHisto * 4,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-        });
-
-        if (bytesPerPayloadElem !== 4) {
-            throw new Error("Currently only 4 byte values are allowed");
-        }
-        
-        const payloadSize = Math.max(keysize * bytesPerPayloadElem, 1);
-        
-        const payloadA = device.createBuffer({
-            label: "Radix payload buffer a",
-            size: payloadSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-        });
-
-        const payloadB = device.createBuffer({
-            label: "Radix payload buffer b",
-            size: payloadSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-        });
-
-        return [bufferA, bufferB, payloadA, payloadB];
-    }
-
-    createInternalMemBuffer(device: GPUDevice, keysize: number): GPUBuffer {
-        const [, scatterBlocksRu] = GPURSSorter.getScatterHistogramSizes(keysize);
-        const histoSize = RS_RADIX_SIZE * 4;
-        const internalSize = (RS_KEYVAL_SIZE + scatterBlocksRu - 1 + 1) * histoSize;
-
-        return device.createBuffer({
-            label: "Internal radix sort buffer",
-            size: internalSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-        });
-    }
-
-    createBindGroup(
-        device: GPUDevice,
-        keysize: number,
-        internalMemBuffer: GPUBuffer,
-        keyvalA: GPUBuffer,
-        keyvalB: GPUBuffer,
-        payloadA: GPUBuffer,
-        payloadB: GPUBuffer
-    ): [GPUBuffer, GPUBuffer, GPUBindGroup] {
-        const [, scatterBlocksRu, , , , countRuHisto] = GPURSSorter.getScatterHistogramSizes(keysize);
-
-        const dispatchInfos = new IndirectDispatch(scatterBlocksRu, 1, 1);
-        const uniformInfos = new GeneralInfo(keysize, countRuHisto, 4, 0, 0);
-
-        const uniformBuffer = device.createBuffer({
-            label: "Radix uniform buffer",
-            size: 20,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-            mappedAtCreation: true,
-        });
-        
-        const uniformData = new Uint32Array(uniformBuffer.getMappedRange());
-        uniformData[0] = uniformInfos.keysSize;
-        uniformData[1] = uniformInfos.paddedSize;
-        uniformData[2] = uniformInfos.passes;
-        uniformData[3] = uniformInfos.evenPass;
-        uniformData[4] = uniformInfos.oddPass;
-        uniformBuffer.unmap();
-
-        const dispatchBuffer = device.createBuffer({
-            label: "Dispatch indirect buffer",
-            size: 12,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
-            mappedAtCreation: true,
-        });
-        
-        const dispatchData = new Uint32Array(dispatchBuffer.getMappedRange());
-        dispatchData[0] = dispatchInfos.dispatchX;
-        dispatchData[1] = dispatchInfos.dispatchY;
-        dispatchData[2] = dispatchInfos.dispatchZ;
-        dispatchBuffer.unmap();
-
-        const bindGroup = device.createBindGroup({
-            label: "Radix bind group",
-            layout: this.bindGroupLayout,
-            entries: [
-                { binding: 0, resource: { buffer: uniformBuffer } },
-                { binding: 1, resource: { buffer: internalMemBuffer } },
-                { binding: 2, resource: { buffer: keyvalA } },
-                { binding: 3, resource: { buffer: keyvalB } },
-                { binding: 4, resource: { buffer: payloadA } },
-                { binding: 5, resource: { buffer: payloadB } },
-            ],
-        });
-
-        return [uniformBuffer, dispatchBuffer, bindGroup];
-    }
-
-    createBindGroupRender(device: GPUDevice, generalInfos: GPUBuffer, payloadA: GPUBuffer): GPUBindGroup {
-        return device.createBindGroup({
-            label: "Render bind group",
-            layout: this.renderBindGroupLayout,
-            entries: [
-                { binding: 0, resource: { buffer: generalInfos } },
-                { binding: 4, resource: { buffer: payloadA } },
-            ],
-        });
-    }
-
-    createBindGroupPreprocess(
-        device: GPUDevice,
-        uniformBuffer: GPUBuffer,
-        dispatchBuffer: GPUBuffer,
-        keyvalA: GPUBuffer,
-        payloadA: GPUBuffer
-    ): GPUBindGroup {
-        return device.createBindGroup({
-            label: "Preprocess bind group",
-            layout: this.preprocessBindGroupLayout,
-            entries: [
-                { binding: 0, resource: { buffer: uniformBuffer } },
-                { binding: 1, resource: { buffer: keyvalA } },
-                { binding: 2, resource: { buffer: payloadA } },
-                { binding: 3, resource: { buffer: dispatchBuffer } },
-            ],
-        });
-    }
-
-    static recordResetIndirectBuffer(indirectBuffer: GPUBuffer, uniformBuffer: GPUBuffer, queue: GPUQueue): void {
-        const zeroData = new Uint8Array(4);
-        queue.writeBuffer(indirectBuffer, 0, zeroData);
-        queue.writeBuffer(uniformBuffer, 0, zeroData);
-    }
-
-    recordCalculateHistogram(bindGroup: GPUBindGroup, keysize: number, encoder: GPUCommandEncoder): void {
-        const [, , , , histBlocksRu] = GPURSSorter.getScatterHistogramSizes(keysize);
-
-        {
-            const pass = encoder.beginComputePass({ label: "zeroing the histogram" });
-            pass.setPipeline(this.zeroP);
-            pass.setBindGroup(0, bindGroup);
-            pass.dispatchWorkgroups(histBlocksRu, 1, 1);
-            pass.end();
-        }
-
-        {
-            const pass = encoder.beginComputePass({ label: "calculate histogram" });
-            pass.setPipeline(this.histogramP);
-            pass.setBindGroup(0, bindGroup);
-            pass.dispatchWorkgroups(histBlocksRu, 1, 1);
-            pass.end();
-        }
-    }
-
-    recordCalculateHistogramIndirect(bindGroup: GPUBindGroup, dispatchBuffer: GPUBuffer, encoder: GPUCommandEncoder): void {
-        {
-            const pass = encoder.beginComputePass({ label: "zeroing the histogram" });
-            pass.setPipeline(this.zeroP);
-            pass.setBindGroup(0, bindGroup);
-            pass.dispatchWorkgroupsIndirect(dispatchBuffer, 0);
-            pass.end();
-        }
-
-        {
-            const pass = encoder.beginComputePass({ label: "calculate histogram" });
-            pass.setPipeline(this.histogramP);
-            pass.setBindGroup(0, bindGroup);
-            pass.dispatchWorkgroupsIndirect(dispatchBuffer, 0);
-            pass.end();
-        }
-    }
-
-    recordPrefixHistogram(bindGroup: GPUBindGroup, passes: number, encoder: GPUCommandEncoder): void {
-        const pass = encoder.beginComputePass({ label: "prefix histogram" });
-        pass.setPipeline(this.prefixP);
-        pass.setBindGroup(0, bindGroup);
-        pass.dispatchWorkgroups(passes, 1, 1);
-        pass.end();
-    }
-
-    recordScatterKeys(bindGroup: GPUBindGroup, passes: number, keysize: number, encoder: GPUCommandEncoder): void {
-        if (passes !== 4) {
-            throw new Error("Currently the amount of passes is hardcoded in the shader");
-        }
-        
-        const [, scatterBlocksRu] = GPURSSorter.getScatterHistogramSizes(keysize);
-        const pass = encoder.beginComputePass({ label: "Scatter keyvals" });
-
-        pass.setBindGroup(0, bindGroup);
-        pass.setPipeline(this.scatterEvenP);
-        pass.dispatchWorkgroups(scatterBlocksRu, 1, 1);
-
-        pass.setPipeline(this.scatterOddP);
-        pass.dispatchWorkgroups(scatterBlocksRu, 1, 1);
-
-        pass.setPipeline(this.scatterEvenP);
-        pass.dispatchWorkgroups(scatterBlocksRu, 1, 1);
-
-        pass.setPipeline(this.scatterOddP);
-        pass.dispatchWorkgroups(scatterBlocksRu, 1, 1);
-        
-        pass.end();
-    }
-
-    recordScatterKeysIndirect(bindGroup: GPUBindGroup, passes: number, dispatchBuffer: GPUBuffer, encoder: GPUCommandEncoder): void {
-        if (passes !== 4) {
-            throw new Error("Currently the amount of passes is hardcoded in the shader");
-        }
-
-        const pass = encoder.beginComputePass({ label: "Scatter keyvals" });
-
-        pass.setBindGroup(0, bindGroup);
-        pass.setPipeline(this.scatterEvenP);
-        pass.dispatchWorkgroupsIndirect(dispatchBuffer, 0);
-
-        pass.setPipeline(this.scatterOddP);
-        pass.dispatchWorkgroupsIndirect(dispatchBuffer, 0);
-
-        pass.setPipeline(this.scatterEvenP);
-        pass.dispatchWorkgroupsIndirect(dispatchBuffer, 0);
-
-        pass.setPipeline(this.scatterOddP);
-        pass.dispatchWorkgroupsIndirect(dispatchBuffer, 0);
-        
-        pass.end();
-    }
-
-    recordSort(bindGroup: GPUBindGroup, keysize: number, encoder: GPUCommandEncoder): void {
-        this.recordCalculateHistogram(bindGroup, keysize, encoder);
-        this.recordPrefixHistogram(bindGroup, 4, encoder);
-        this.recordScatterKeys(bindGroup, 4, keysize, encoder);
-    }
-
-    recordSortIndirect(bindGroup: GPUBindGroup, dispatchBuffer: GPUBuffer, encoder: GPUCommandEncoder): void {
-        this.recordCalculateHistogramIndirect(bindGroup, dispatchBuffer, encoder);
-        this.recordPrefixHistogram(bindGroup, 4, encoder);
-        this.recordScatterKeysIndirect(bindGroup, 4, dispatchBuffer, encoder);
-    }
-}
-
-export class PointCloudSortStuff {
-    numPoints: number;
-    sorterUni: GPUBuffer; // uniform buffer information
-    sorterDis: GPUBuffer; // dispatch buffer
-    sorterBg: GPUBindGroup; // sorter bind group
-    sorterRenderBg: GPUBindGroup; // bind group only with the sorted indices for rendering
-    sorterBgPre: GPUBindGroup; // bind group for the preprocess
-
-    constructor(
-        numPoints: number,
-        sorterUni: GPUBuffer,
-        sorterDis: GPUBuffer,
-        sorterBg: GPUBindGroup,
-        sorterRenderBg: GPUBindGroup,
-        sorterBgPre: GPUBindGroup
-    ) {
-        this.numPoints = numPoints;
-        this.sorterUni = sorterUni;
-        this.sorterDis = sorterDis;
-        this.sorterBg = sorterBg;
-        this.sorterRenderBg = sorterRenderBg;
-        this.sorterBgPre = sorterBgPre;
-    }
-}
-
-export class IndirectDispatch {
-    dispatchX: number;
-    dispatchY: number;
-    dispatchZ: number;
-
-    constructor(dispatchX: number, dispatchY: number, dispatchZ: number) {
-        this.dispatchX = dispatchX;
-        this.dispatchY = dispatchY;
-        this.dispatchZ = dispatchZ;
-    }
-}
-
-export class GeneralInfo {
-    keysSize: number;
-    paddedSize: number;
-    passes: number;
-    evenPass: number;
-    oddPass: number;
-
-    constructor(keysSize: number, paddedSize: number, passes: number, evenPass: number, oddPass: number) {
-        this.keysSize = keysSize;
-        this.paddedSize = paddedSize;
-        this.passes = passes;
-        this.evenPass = evenPass;
-        this.oddPass = oddPass;
-    }
-}
-
-function uploadToBuffer<T>(buffer: GPUBuffer, device: GPUDevice, queue: GPUQueue, values: ArrayLike<T>): void {
-    // Convert values to Uint8Array for upload
-    let data: Uint8Array;
-    if (values instanceof Float32Array) {
-        data = new Uint8Array(values.buffer);
-    } else if (values instanceof Uint32Array) {
-        data = new Uint8Array(values.buffer);
-    } else {
-        // Generic conversion for other types
-        const float32Array = new Float32Array(values as ArrayLike<number>);
-        data = new Uint8Array(float32Array.buffer);
-    }
-
-    const stagingBuffer = device.createBuffer({
-        label: "Staging buffer",
-        size: data.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-        mappedAtCreation: true,
+    const bind_group = device.createBindGroup({
+      label: 'Radix bind group',
+      layout: this.bind_group_layout,
+      entries: [
+        { binding: 0, resource: { buffer: uniform_buffer } },
+        { binding: 1, resource: { buffer: internal_mem_buffer } },
+        { binding: 2, resource: { buffer: keyval_a } },
+        { binding: 3, resource: { buffer: keyval_b } },
+        { binding: 4, resource: { buffer: payload_a } },
+        { binding: 5, resource: { buffer: payload_b } }
+      ]
     });
-    
-    new Uint8Array(stagingBuffer.getMappedRange()).set(data);
-    stagingBuffer.unmap();
 
-    const encoder = device.createCommandEncoder({ label: "Copy encoder" });
-    encoder.copyBufferToBuffer(stagingBuffer, 0, buffer, 0, stagingBuffer.size);
+    return [uniform_buffer, dispatch_buffer, bind_group];
+  }
+
+  createBindGroupRender(device: GPUDevice, general_infos: GPUBuffer, payload_a: GPUBuffer): GPUBindGroup {
+    return device.createBindGroup({
+      label: 'Render bind group',
+      layout: this.render_bind_group_layout,
+      entries: [
+        { binding: 0, resource: { buffer: general_infos } },
+        { binding: 4, resource: { buffer: payload_a } }
+      ]
+    });
+  }
+
+  createBindGroupPreprocess(
+    device: GPUDevice,
+    uniform_buffer: GPUBuffer,
+    dispatch_buffer: GPUBuffer,
+    keyval_a: GPUBuffer,
+    payload_a: GPUBuffer
+  ): GPUBindGroup {
+    return device.createBindGroup({
+      label: 'Preprocess bind group',
+      layout: this.preprocess_bind_group_layout,
+      entries: [
+        { binding: 0, resource: { buffer: uniform_buffer } },
+        { binding: 1, resource: { buffer: keyval_a } },
+        { binding: 2, resource: { buffer: payload_a } },
+        { binding: 3, resource: { buffer: dispatch_buffer } }
+      ]
+    });
+  }
+
+  // ---- “Static” helper in Rust — keep as static here too ----
+  static recordResetIndirectBuffer(indirect_buffer: GPUBuffer, uniform_buffer: GPUBuffer, queue: GPUQueue): void {
+    const zero4 = new Uint8Array([0, 0, 0, 0]);
+    queue.writeBuffer(indirect_buffer, 0, zero4); // dispatch_x = 0
+    queue.writeBuffer(uniform_buffer, 0, zero4);  // keys_size = 0
+  }
+
+  // ---- Recorders (compute passes) ----
+  record_calculate_histogram(bind_group: GPUBindGroup, keysize: number, encoder: GPUCommandEncoder): void {
+    const [, , , , hist_blocks_ru] = GPURSSorter.getScatterHistogramSizes(keysize);
+
+    {
+      const pass = encoder.beginComputePass({ label: 'zeroing the histogram' });
+      pass.setPipeline(this.zero_p);
+      pass.setBindGroup(0, bind_group);
+      pass.dispatchWorkgroups(hist_blocks_ru, 1, 1);
+      pass.end();
+    }
+    {
+      const pass = encoder.beginComputePass({ label: 'calculate histogram' });
+      pass.setPipeline(this.histogram_p);
+      pass.setBindGroup(0, bind_group);
+      pass.dispatchWorkgroups(hist_blocks_ru, 1, 1);
+      pass.end();
+    }
+  }
+
+  record_calculate_histogram_indirect(bind_group: GPUBindGroup, dispatch_buffer: GPUBuffer, encoder: GPUCommandEncoder): void {
+    {
+      const pass = encoder.beginComputePass({ label: 'zeroing the histogram' });
+      pass.setPipeline(this.zero_p);
+      pass.setBindGroup(0, bind_group);
+      pass.dispatchWorkgroupsIndirect(dispatch_buffer, 0);
+      pass.end();
+    }
+    {
+      const pass = encoder.beginComputePass({ label: 'calculate histogram' });
+      pass.setPipeline(this.histogram_p);
+      pass.setBindGroup(0, bind_group);
+      pass.dispatchWorkgroupsIndirect(dispatch_buffer, 0);
+      pass.end();
+    }
+  }
+
+  // There is no indirect prefix step — number of prefixes depends on passes (4).
+  record_prefix_histogram(bind_group: GPUBindGroup, passes: number, encoder: GPUCommandEncoder): void {
+    const pass = encoder.beginComputePass({ label: 'prefix histogram' });
+    pass.setPipeline(this.prefix_p);
+    pass.setBindGroup(0, bind_group);
+    pass.dispatchWorkgroups(passes, 1, 1);
+    pass.end();
+  }
+
+  record_scatter_keys(bind_group: GPUBindGroup, passes: number, keysize: number, encoder: GPUCommandEncoder): void {
+    if (passes !== 4) throw new Error('passes must be 4');
+    const [, scatter_blocks_ru] = GPURSSorter.getScatterHistogramSizes(keysize);
+
+    const pass = encoder.beginComputePass({ label: 'Scatter keyvals' });
+    pass.setBindGroup(0, bind_group);
+
+    pass.setPipeline(this.scatter_even_p);
+    pass.dispatchWorkgroups(scatter_blocks_ru, 1, 1);
+
+    pass.setPipeline(this.scatter_odd_p);
+    pass.dispatchWorkgroups(scatter_blocks_ru, 1, 1);
+
+    pass.setPipeline(this.scatter_even_p);
+    pass.dispatchWorkgroups(scatter_blocks_ru, 1, 1);
+
+    pass.setPipeline(this.scatter_odd_p);
+    pass.dispatchWorkgroups(scatter_blocks_ru, 1, 1);
+
+    pass.end();
+  }
+
+  record_scatter_keys_indirect(bind_group: GPUBindGroup, passes: number, dispatch_buffer: GPUBuffer, encoder: GPUCommandEncoder): void {
+    if (passes !== 4) throw new Error('passes must be 4');
+
+    const pass = encoder.beginComputePass({ label: 'Scatter keyvals' });
+    pass.setBindGroup(0, bind_group);
+
+    pass.setPipeline(this.scatter_even_p);
+    pass.dispatchWorkgroupsIndirect(dispatch_buffer, 0);
+
+    pass.setPipeline(this.scatter_odd_p);
+    pass.dispatchWorkgroupsIndirect(dispatch_buffer, 0);
+
+    pass.setPipeline(this.scatter_even_p);
+    pass.dispatchWorkgroupsIndirect(dispatch_buffer, 0);
+
+    pass.setPipeline(this.scatter_odd_p);
+    pass.dispatchWorkgroupsIndirect(dispatch_buffer, 0);
+
+    pass.end();
+  }
+
+  record_sort(bind_group: GPUBindGroup, keysize: number, encoder: GPUCommandEncoder): void {
+    this.record_calculate_histogram(bind_group, keysize, encoder);
+    this.record_prefix_histogram(bind_group, 4, encoder);
+    this.record_scatter_keys(bind_group, 4, keysize, encoder);
+  }
+
+  recordSortIndirect(bind_group: GPUBindGroup, dispatch_buffer: GPUBuffer, encoder: GPUCommandEncoder): void {
+    this.record_calculate_histogram_indirect(bind_group, dispatch_buffer, encoder);
+    this.record_prefix_histogram(bind_group, 4, encoder);
+    this.record_scatter_keys_indirect(bind_group, 4, dispatch_buffer, encoder);
+  }
+
+  // ---- Small self-check used during subgroup-size probing (mirrors test_sort) ----
+  private async test_sort(device: GPUDevice, queue: GPUQueue): Promise<boolean> {
+    const n = 8192;
+    const scrambled = new Float32Array(n);
+    for (let i = 0; i < n; i++) scrambled[i] = (n - 1 - i);
+
+    const internal_mem_buffer = this.createInternalMemBuffer(device, n);
+    const [keyval_a, keyval_b, payload_a, payload_b] = GPURSSorter.createKeyvalBuffers(device, n, 4);
+    const [uniform_buffer, dispatch_buffer, bind_group] = this.createBindGroup(
+      device, n, internal_mem_buffer, keyval_a, keyval_b, payload_a, payload_b
+    );
+
+    // upload keys into keyval_a
+    queue.writeBuffer(keyval_a, 0, scrambled.buffer);
+
+    const encoder = device.createCommandEncoder({ label: 'GPURSSorter test_sort' });
+    this.record_sort(bind_group, n, encoder);
     queue.submit([encoder.finish()]);
+    await queue.onSubmittedWorkDone();
 
-    // Wait for completion and cleanup
-    device.queue.onSubmittedWorkDone().then(() => {
-        stagingBuffer.destroy();
-    });
+    const sorted = await downloadBufferF32(device, queue, keyval_a, n);
+    for (let i = 0; i < n; i++) {
+      if (sorted[i] !== i) return false;
+    }
+    // cleanup (optional in browser)
+    uniform_buffer.destroy(); dispatch_buffer.destroy(); internal_mem_buffer.destroy();
+    keyval_a.destroy(); keyval_b.destroy(); payload_a.destroy(); payload_b.destroy();
+    return true;
+  }
 }
 
-async function downloadBuffer<T>(buffer: GPUBuffer, device: GPUDevice, queue: GPUQueue): Promise<T[]> {
-    const downloadBuffer = device.createBuffer({
-        label: "Download buffer",
-        size: buffer.size,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
+// ===== Map-read helper (Float32) =====
+async function downloadBufferF32(device: GPUDevice, queue: GPUQueue, src: GPUBuffer, count: number): Promise<Float32Array> {
+  const byteLength = count * 4;
+  const dst = device.createBuffer({
+    label: 'Download buffer',
+    size: byteLength,
+    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+  });
+  const encoder = device.createCommandEncoder({ label: 'Copy encoder' });
+  encoder.copyBufferToBuffer(src, 0, dst, 0, byteLength);
+  queue.submit([encoder.finish()]);
+  await queue.onSubmittedWorkDone();
 
-    const encoder = device.createCommandEncoder({ label: "Copy encoder" });
-    encoder.copyBufferToBuffer(buffer, 0, downloadBuffer, 0, buffer.size);
-    queue.submit([encoder.finish()]);
-
-    await downloadBuffer.mapAsync(GPUMapMode.READ);
-    const data = downloadBuffer.getMappedRange();
-    
-    // Convert to appropriate type array
-    const float32Array = new Float32Array(data);
-    const result = Array.from(float32Array) as T[];
-    
-    downloadBuffer.unmap();
-    downloadBuffer.destroy();
-    
-    return result;
+  await dst.mapAsync(GPUMapMode.READ);
+  const copy = dst.getMappedRange().slice(0);
+  dst.unmap();
+  dst.destroy();
+  return new Float32Array(copy);
 }

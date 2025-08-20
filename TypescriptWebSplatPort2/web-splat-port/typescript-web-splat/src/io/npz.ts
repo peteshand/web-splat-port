@@ -1,260 +1,231 @@
-import { vec3, quat } from 'gl-matrix';
-import { GaussianCompressed, GaussianQuantization, Quantization, Covariance3D } from '../pointcloud.js';
-import { buildCov, shDegFromNumCoefs, shNumCoefficients } from '../utils.js';
-import { GenericGaussianPointCloud, PointCloudReader } from './mod.js';
+// io/npz.ts
+// 1:1 port of src/io/npz.rs (logic and structure preserved)
 
-// NPZ file format interfaces
-interface NpzArray {
-    shape: number[];
-    dtype: string;
-    data: ArrayBuffer;
+import { quat, vec3 } from 'gl-matrix';
+
+import {
+  Covariance3D,
+  GaussianCompressed,
+  GaussianQuantization,
+  Quantization,
+} from '../pointcloud';
+import {
+  buildCov,
+  shDegFromNumCoefs,
+  shNumCoefficients,
+} from '../utils';
+import { GenericGaussianPointCloud, PointCloudReader } from './mod';
+
+/* -------------------------------------------------------------------------- */
+/*                 minimal NPZ adapter interfaces (sync-style)                */
+/* -------------------------------------------------------------------------- */
+
+export interface INpzArray<T = number> {
+  data: ArrayLike<T>;
+  shape: number[];
 }
 
-interface NpzArchive {
-    [key: string]: NpzArray;
+export interface INpzArchive {
+  byName<T = number>(name: string): INpzArray<T> | undefined;
 }
+
+/* -------------------------------------------------------------------------- */
+/*                                  Reader                                     */
+/* -------------------------------------------------------------------------- */
 
 export class NpzReader implements PointCloudReader {
-    private npzFile: NpzArchive;
-    private shDeg: number;
-    private kernelSize?: number;
-    private mipSplatting?: boolean;
-    private backgroundColor?: [number, number, number];
+  private npzFile: INpzArchive;
+  private sh_deg: number;
+  private kernel_size: number | null;
+  private mip_splatting: boolean | null;
+  private background_color: [number, number, number] | null;
 
-    constructor(data: ArrayBuffer) {
-        this.npzFile = this.parseNpz(data);
-        this.shDeg = this.calculateShDeg();
-        this.kernelSize = this.getNpzValue<number>('kernel_size');
-        this.mipSplatting = this.getNpzValue<boolean>('mip_splatting');
-        this.backgroundColor = this.getBackgroundColor();
+  constructor(reader: INpzArchive) {
+    this.npzFile = reader;
+
+    let sh_deg = 0;
+    const rest = this.npzFile.byName<number>('features_rest');
+    if (rest) {
+      const maybeDeg = shDegFromNumCoefs(rest.shape[1] + 1);
+      if (maybeDeg == null) throw new Error('num sh coefs not valid');
+      sh_deg = maybeDeg;
+    }
+    this.sh_deg = sh_deg;
+
+    this.kernel_size = get_npz_value<number>(this.npzFile, 'kernel_size');
+    this.mip_splatting = get_npz_value<number>(this.npzFile, 'mip_splatting') as unknown as (boolean | null);
+
+    const bg = get_npz_array_optional<number>(this.npzFile, 'background_color');
+    this.background_color = bg ? ([bg[0], bg[1], bg[2]] as [number, number, number]) : null;
+  }
+
+  static magic_bytes(): Uint8Array {
+    return new Uint8Array([0x50, 0x4B, 0x03, 0x04]);
+  }
+  static file_ending(): string { return 'npz'; }
+
+  read(): GenericGaussianPointCloud {
+    const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+    const opacity_scale = get_npz_value<number>(this.npzFile, 'opacity_scale') ?? 1.0;
+    const opacity_zero_point = get_npz_value<number>(this.npzFile, 'opacity_zero_point') ?? 0;
+
+    const scaling_scale = get_npz_value<number>(this.npzFile, 'scaling_scale') ?? 1.0;
+    const scaling_zero_point = (get_npz_value<number>(this.npzFile, 'scaling_zero_point') ?? 0);
+
+    const rotation_scale = get_npz_value<number>(this.npzFile, 'rotation_scale') ?? 1.0;
+    const rotation_zero_point = (get_npz_value<number>(this.npzFile, 'rotation_zero_point') ?? 0);
+
+    const features_dc_scale = get_npz_value<number>(this.npzFile, 'features_dc_scale') ?? 1.0;
+    const features_dc_zero_point = get_npz_value<number>(this.npzFile, 'features_dc_zero_point') ?? 0;
+
+    const features_rest_scale = get_npz_value<number>(this.npzFile, 'features_rest_scale') ?? 1.0;
+    const features_rest_zero_point = get_npz_value<number>(this.npzFile, 'features_rest_zero_point') ?? 0;
+
+    let scaling_factor: number[] | null = null;
+    let scaling_factor_zero_point = 0;
+    let scaling_factor_scale = 1.0;
+
+    if (this.npzFile.byName('scaling_factor_scale')) {
+      scaling_factor_scale = get_npz_value<number>(this.npzFile, 'scaling_factor_scale') ?? 1.0;
+      scaling_factor_zero_point = get_npz_value<number>(this.npzFile, 'scaling_factor_zero_point') ?? 0;
+      scaling_factor = try_get_npz_array<number>(this.npzFile, 'scaling_factor');
     }
 
-    private parseNpz(data: ArrayBuffer): NpzArchive {
-        // This is a simplified NPZ parser
-        // In a real implementation, you would use a proper NPZ/ZIP library
-        // For now, we'll create a placeholder that throws an error
-        throw new Error('NPZ parsing not implemented - requires proper ZIP/NPZ library');
+    const xyzRaw = try_get_npz_array<number>(this.npzFile, 'xyz');
+    const xyz = chunk3(xyzRaw).map(([x, y, z]) => ({ x, y, z }));
+
+    let scaling: Array<ReturnType<typeof vec3.fromValues>>;
+    const scalingRaw = try_get_npz_array<number>(this.npzFile, 'scaling');
+    if (!scaling_factor) {
+      const vals = scalingRaw.map((c) => Math.exp((c - scaling_zero_point) * scaling_scale));
+      scaling = chunk3(vals).map(([x, y, z]) => vec3.fromValues(x, y, z));
+    } else {
+      const vals = scalingRaw.map((c) => Math.max((c - scaling_zero_point) * scaling_scale, 0));
+      scaling = chunk3(vals).map(([x, y, z]) => {
+        const v = vec3.fromValues(x, y, z);
+        const n = vec3.len(v);
+        return n > 0 ? vec3.scale(vec3.create(), v, 1 / n) : vec3.fromValues(0, 0, 0);
+      });
     }
 
-    private calculateShDeg(): number {
-        if (this.npzFile['features_rest']) {
-            const featuresRest = this.npzFile['features_rest'];
-            const shDeg = shDegFromNumCoefs(featuresRest.shape[1] + 1);
-            if (shDeg === null) {
-                throw new Error('Invalid number of SH coefficients');
-            }
-            return shDeg;
-        }
-        return 0;
+    const rotationRaw = try_get_npz_array<number>(this.npzFile, 'rotation');
+    const rotation = chunkN(rotationRaw.map((c) => (c - rotation_zero_point) * rotation_scale), 4)
+      .map(([w, x, y, z]) => {
+        const q = quat.fromValues(x, y, z, w);
+        return quat.normalize(q, q);
+      });
+
+    const opacity = try_get_npz_array<number>(this.npzFile, 'opacity');
+
+    let feature_indices: number[] | null = null;
+    if (this.npzFile.byName('feature_indices')) {
+      feature_indices = try_get_npz_array<number>(this.npzFile, 'feature_indices').map((v) => v >>> 0);
     }
 
-    private getBackgroundColor(): [number, number, number] | undefined {
-        const bgArray = this.getNpzArrayOptional<number>('background_color');
-        if (bgArray && bgArray.length >= 3) {
-            return [bgArray[0], bgArray[1], bgArray[2]];
-        }
-        return undefined;
+    let gaussian_indices: number[] | null = null;
+    if (this.npzFile.byName('gaussian_indices')) {
+      gaussian_indices = try_get_npz_array<number>(this.npzFile, 'gaussian_indices').map((v) => v >>> 0);
     }
 
-    private getNpzValue<T>(fieldName: string): T | undefined {
-        const array = this.getNpzArrayOptional<T>(fieldName);
-        return array && array.length > 0 ? array[0] : undefined;
+    const features_dc = try_get_npz_array<number>(this.npzFile, 'features_dc');
+    const features_rest = try_get_npz_array<number>(this.npzFile, 'features_rest');
+
+    const num_points = xyz.length;
+    const sh_deg = this.sh_deg;
+    const num_sh_coeffs = shNumCoefficients(sh_deg);
+
+    const gaussians: GaussianCompressed[] = [];
+    for (let i = 0; i < num_points; i++) {
+      gaussians.push({
+        xyz: xyz[i],
+        opacity: opacity[i] | 0,
+        scale_factor: scaling_factor ? (scaling_factor[i] | 0) : 0,
+        geometry_idx: gaussian_indices ? gaussian_indices[i] >>> 0 : i >>> 0,
+        sh_idx: feature_indices ? feature_indices[i] >>> 0 : i >>> 0,
+      });
     }
 
-    private getNpzArrayOptional<T>(fieldName: string): T[] | undefined {
-        const npzArray = this.npzFile[fieldName];
-        if (!npzArray) {
-            return undefined;
-        }
-        return this.parseTypedArray<T>(npzArray);
+    const sh_coeffs_length = (num_sh_coeffs * 3) | 0;
+    const rest_num_coefs = (sh_coeffs_length - 3) | 0;
+    const sh_coefs_tmp: number[] = [];
+    for (let i = 0; i < features_dc.length / 3; i++) {
+      sh_coefs_tmp.push(features_dc[i * 3 + 0] | 0);
+      sh_coefs_tmp.push(features_dc[i * 3 + 1] | 0);
+      sh_coefs_tmp.push(features_dc[i * 3 + 2] | 0);
+      for (let j = 0; j < rest_num_coefs; j++) {
+        sh_coefs_tmp.push(features_rest[i * rest_num_coefs + j] | 0);
+      }
     }
+    // --- FIX 2: convert signed i8 values to raw bytes (Uint8Array) ---
+    const sh_coefs = new Uint8Array(sh_coefs_tmp.length);
+    for (let i = 0; i < sh_coefs_tmp.length; i++) sh_coefs[i] = sh_coefs_tmp[i] & 0xff;
 
-    private tryGetNpzArray<T>(fieldName: string): T[] {
-        const array = this.getNpzArrayOptional<T>(fieldName);
-        if (!array) {
-            throw new Error(`Array ${fieldName} missing`);
-        }
-        return array;
-    }
+    // --- FIX 1: produce Covariance3D objects with required `v` field ---
+    const covars: Covariance3D[] = rotation.map((q, i) => {
+      const c = buildCov(q, scaling[i]); // [m00,m01,m02,m11,m12,m22]
+      return { v: [c[0], c[1], c[2], c[3], c[4], c[5]] };
+    });
 
-    private parseTypedArray<T>(npzArray: NpzArray): T[] {
-        // Convert ArrayBuffer to typed array based on dtype
-        const { data, dtype } = npzArray;
-        
-        switch (dtype) {
-            case 'float32':
-                return Array.from(new Float32Array(data)) as T[];
-            case 'float64':
-                return Array.from(new Float64Array(data)) as T[];
-            case 'int8':
-                return Array.from(new Int8Array(data)) as T[];
-            case 'int16':
-                return Array.from(new Int16Array(data)) as T[];
-            case 'int32':
-                return Array.from(new Int32Array(data)) as T[];
-            case 'uint8':
-                return Array.from(new Uint8Array(data)) as T[];
-            case 'uint16':
-                return Array.from(new Uint16Array(data)) as T[];
-            case 'uint32':
-                return Array.from(new Uint32Array(data)) as T[];
-            default:
-                throw new Error(`Unsupported dtype: ${dtype}`);
-        }
-    }
+    const t1 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    console.info('reading took', (t1 - t0).toFixed(2), 'ms');
 
-    read(): GenericGaussianPointCloud {
-        const startTime = performance.now();
+    const quantization: GaussianQuantization = {
+      color_dc: Quantization.new(features_dc_zero_point, features_dc_scale),
+      color_rest: Quantization.new(features_rest_zero_point, features_rest_scale),
+      opacity: Quantization.new(opacity_zero_point, opacity_scale),
+      scaling_factor: Quantization.new(scaling_factor_zero_point, scaling_factor_scale),
+    };
 
-        // Get quantization parameters
-        const opacityScale = this.getNpzValue<number>('opacity_scale') ?? 1.0;
-        const opacityZeroPoint = this.getNpzValue<number>('opacity_zero_point') ?? 0;
+    return GenericGaussianPointCloud.new_compressed(
+      gaussians,
+      sh_coefs,
+      sh_deg,
+      num_points,
+      this.kernel_size ?? null,
+      this.mip_splatting ?? null,
+      this.background_color ?? null,
+      covars,
+      quantization,
+    );
+  }
 
-        const scalingScale = this.getNpzValue<number>('scaling_scale') ?? 1.0;
-        const scalingZeroPoint = this.getNpzValue<number>('scaling_zero_point') ?? 0;
+  static magic_bytes_ts(): Uint8Array { return NpzReader.magic_bytes(); }
+  static file_ending_ts(): string { return NpzReader.file_ending(); }
+}
 
-        const rotationScale = this.getNpzValue<number>('rotation_scale') ?? 1.0;
-        const rotationZeroPoint = this.getNpzValue<number>('rotation_zero_point') ?? 0;
+/* -------------------------------------------------------------------------- */
+/*                                helpers (TS)                                 */
+/* -------------------------------------------------------------------------- */
 
-        const featuresDcScale = this.getNpzValue<number>('features_dc_scale') ?? 1.0;
-        const featuresDcZeroPoint = this.getNpzValue<number>('features_dc_zero_point') ?? 0;
+function chunk3(a: ArrayLike<number>): [number, number, number][] {
+  const out: [number, number, number][] = [];
+  for (let i = 0; i < a.length; i += 3) out.push([a[i], a[i + 1], a[i + 2]]);
+  return out;
+}
+function chunkN(a: ArrayLike<number>, n: number): number[][] {
+  const out: number[][] = [];
+  for (let i = 0; i < a.length; i += n) {
+    const row = new Array(n);
+    for (let j = 0; j < n; j++) row[j] = a[i + j];
+    out.push(row);
+  }
+  return out;
+}
 
-        const featuresRestScale = this.getNpzValue<number>('features_rest_scale') ?? 1.0;
-        const featuresRestZeroPoint = this.getNpzValue<number>('features_rest_zero_point') ?? 0;
-
-        // Optional scaling factor
-        let scalingFactor: number[] | undefined;
-        let scalingFactorZeroPoint = 0;
-        let scalingFactorScale = 1.0;
-
-        if (this.npzFile['scaling_factor_scale']) {
-            scalingFactorScale = this.getNpzValue<number>('scaling_factor_scale') ?? 1.0;
-            scalingFactorZeroPoint = this.getNpzValue<number>('scaling_factor_zero_point') ?? 0;
-            scalingFactor = this.tryGetNpzArray<number>('scaling_factor');
-        }
-
-        // Load point data
-        const xyzData = this.tryGetNpzArray<number>('xyz');
-        const xyz: { x: number, y: number, z: number }[] = [];
-        for (let i = 0; i < xyzData.length; i += 3) {
-            xyz.push({ x: xyzData[i], y: xyzData[i + 1], z: xyzData[i + 2] });
-        }
-
-        // Load scaling data
-        const scalingData = this.tryGetNpzArray<number>('scaling');
-        const scaling: vec3[] = [];
-        
-        if (!scalingFactor) {
-            // No scaling factor - scaling is not normalized
-            for (let i = 0; i < scalingData.length; i += 3) {
-                const s1 = Math.exp((scalingData[i] - scalingZeroPoint) * scalingScale);
-                const s2 = Math.exp((scalingData[i + 1] - scalingZeroPoint) * scalingScale);
-                const s3 = Math.exp((scalingData[i + 2] - scalingZeroPoint) * scalingScale);
-                scaling.push(vec3.fromValues(s1, s2, s3));
-            }
-        } else {
-            // With scaling factor - normalize scaling
-            for (let i = 0; i < scalingData.length; i += 3) {
-                const s1 = Math.max(0, (scalingData[i] - scalingZeroPoint) * scalingScale);
-                const s2 = Math.max(0, (scalingData[i + 1] - scalingZeroPoint) * scalingScale);
-                const s3 = Math.max(0, (scalingData[i + 2] - scalingZeroPoint) * scalingScale);
-                const scale = vec3.fromValues(s1, s2, s3);
-                vec3.normalize(scale, scale);
-                scaling.push(scale);
-            }
-        }
-
-        // Load rotation data
-        const rotationData = this.tryGetNpzArray<number>('rotation');
-        const rotation: quat[] = [];
-        for (let i = 0; i < rotationData.length; i += 4) {
-            const r0 = (rotationData[i] - rotationZeroPoint) * rotationScale;
-            const r1 = (rotationData[i + 1] - rotationZeroPoint) * rotationScale;
-            const r2 = (rotationData[i + 2] - rotationZeroPoint) * rotationScale;
-            const r3 = (rotationData[i + 3] - rotationZeroPoint) * rotationScale;
-            const rot = quat.fromValues(r1, r2, r3, r0); // Note: different order
-            quat.normalize(rot, rot);
-            rotation.push(rot);
-        }
-
-        // Load other data
-        const opacity = this.tryGetNpzArray<number>('opacity');
-        const featuresDc = this.tryGetNpzArray<number>('features_dc');
-        const featuresRest = this.tryGetNpzArray<number>('features_rest');
-
-        // Optional indices
-        const featureIndices = this.getNpzArrayOptional<number>('feature_indices');
-        const gaussianIndices = this.getNpzArrayOptional<number>('gaussian_indices');
-
-        const numPoints = xyz.length;
-        const shDeg = this.shDeg;
-        const numShCoeffs = shNumCoefficients(shDeg);
-
-        // Create compressed gaussians
-        const gaussians: GaussianCompressed[] = [];
-        for (let i = 0; i < numPoints; i++) {
-            gaussians.push({
-                xyz: xyz[i],
-                opacity: opacity[i],
-                scaleFactor: scalingFactor ? scalingFactor[i] : 0,
-                geometryIdx: gaussianIndices ? gaussianIndices[i] : i,
-                shIdx: featureIndices ? featureIndices[i] : i
-            });
-        }
-
-        // Pack SH coefficients
-        const shCoefs: number[] = [];
-        const shCoeffsLength = numShCoeffs * 3;
-        const restNumCoefs = shCoeffsLength - 3;
-        
-        for (let i = 0; i < featuresDc.length / 3; i++) {
-            // DC component
-            shCoefs.push(featuresDc[i * 3 + 0]);
-            shCoefs.push(featuresDc[i * 3 + 1]);
-            shCoefs.push(featuresDc[i * 3 + 2]);
-            
-            // Rest components
-            for (let j = 0; j < restNumCoefs; j++) {
-                shCoefs.push(featuresRest[i * restNumCoefs + j]);
-            }
-        }
-
-        // Build covariance matrices
-        const covars: Covariance3D[] = [];
-        for (let i = 0; i < rotation.length; i++) {
-            const cov = buildCov(rotation[i], scaling[i]);
-            covars.push({ data: cov });
-        }
-
-        const duration = performance.now() - startTime;
-        console.log(`Reading took ${duration.toFixed(2)}ms`);
-
-        const quantization = {
-            colorDc: { zeroPoint: featuresDcZeroPoint, scale: featuresDcScale, _pad: [0, 0] as [number, number] },
-            colorRest: { zeroPoint: featuresRestZeroPoint, scale: featuresRestScale, _pad: [0, 0] as [number, number] },
-            opacity: { zeroPoint: opacityZeroPoint, scale: opacityScale, _pad: [0, 0] as [number, number] },
-            scalingFactor: { zeroPoint: scalingFactorZeroPoint, scale: scalingFactorScale, _pad: [0, 0] as [number, number] }
-        };
-
-        return GenericGaussianPointCloud.fromCompressedGaussians(
-            gaussians,
-            new Uint8Array(shCoefs),
-            shDeg,
-            {
-                kernelSize: this.kernelSize,
-                mipSplatting: this.mipSplatting,
-                backgroundColor: this.backgroundColor,
-                covars: covars,
-                quantization: quantization
-            }
-        );
-    }
-
-    static magicBytes(): Uint8Array {
-        return new Uint8Array([0x50, 0x4B, 0x03, 0x04]); // ZIP magic bytes
-    }
-
-    static fileEnding(): string {
-        return 'npz';
-    }
+function get_npz_array_optional<T>(reader: INpzArchive, field_name: string): T[] | null {
+  const arr = reader.byName<T>(field_name);
+  if (!arr) return null;
+  return Array.from(arr.data as ArrayLike<T>);
+}
+function try_get_npz_array<T>(reader: INpzArchive, field_name: string): T[] {
+  const arr = reader.byName<T>(field_name);
+  if (!arr) throw new Error(`array ${field_name} missing`);
+  return Array.from(arr.data as ArrayLike<T>);
+}
+function get_npz_value<T>(reader: INpzArchive, field_name: string): T | null {
+  const arr = get_npz_array_optional<T>(reader, field_name);
+  if (!arr) return null;
+  if (arr.length === 0) throw new Error('array empty');
+  return arr[0] as T;
 }

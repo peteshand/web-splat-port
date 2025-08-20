@@ -10,6 +10,13 @@
   - Port all structs/classes/functions exactly (no additions/removals).
   - Copy `.wgsl` shaders unchanged.
   - Use `gl-matrix` for math; `@webgpu/types` for WebGPU typings.
+  - **CRITICAL**: All changes must align with Rust source implementation. When fixing bugs or issues, always check the corresponding Rust source files to ensure struct layouts, field orders, and data types match exactly.
+- **Development Workflow**:
+  - **NEVER directly edit `.js` files in `dist/` directory**
+  - **ALWAYS edit TypeScript `.ts` files in `src/` directory**
+  - **ALWAYS run `npm run build` after making changes to compile TypeScript to JavaScript**
+  - **Test changes using the compiled output in `dist/index.html`**
+  - This ensures consistency and prevents loss of changes during rebuilds
 - **Browser demo**:
   - Load large PLY files.
   - Parse into `GenericGaussianPointCloud`.

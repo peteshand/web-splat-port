@@ -1,84 +1,52 @@
-/**
- * TypeScript port of io/mod.rs
- * Point cloud I/O system for loading Gaussian splat data
- */
-import { Aabb, Covariance3D, Gaussian, GaussianCompressed, GaussianQuantization, Point3f32, Vector3f32 } from '../pointcloud.js';
-/**
- * Point cloud reader interface
- */
+import { Aabb, Gaussian, GaussianCompressed, Covariance3D, GaussianQuantization, Point3f32, Vector3f32 } from '../pointcloud.js';
+/** One SH coefficient triplet (r,g,b) */
+type SHTriplet = [number, number, number];
+/** Exactly 16 SH triplets, fixed-length tuple */
+type SHBlock16 = [
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet,
+    SHTriplet
+];
 export interface PointCloudReader {
     read(): GenericGaussianPointCloud;
 }
-/**
- * Generic Gaussian point cloud data structure
- */
 export declare class GenericGaussianPointCloud {
-    gaussians: Uint8Array;
-    shCoefs: Uint8Array;
-    compressed: boolean;
-    covars?: Covariance3D[];
-    quantization?: GaussianQuantization;
-    shDeg: number;
-    numPoints: number;
-    kernelSize?: number;
-    mipSplatting?: boolean;
-    backgroundColor?: [number, number, number];
-    up?: Vector3f32;
+    private gaussiansBytes;
+    private shCoefsBytes;
+    private _compressed;
+    covars: Covariance3D[] | null;
+    quantization: GaussianQuantization | null;
+    sh_deg: number;
+    num_points: number;
+    kernel_size: number | null;
+    mip_splatting: boolean | null;
+    background_color: [number, number, number] | null;
+    up: Vector3f32 | null;
     center: Point3f32;
     aabb: Aabb;
-    constructor(gaussians: Uint8Array, shCoefs: Uint8Array, compressed: boolean, shDeg: number, numPoints: number, center: Point3f32, aabb: Aabb, options?: {
-        covars?: Covariance3D[];
-        quantization?: GaussianQuantization;
-        kernelSize?: number;
-        mipSplatting?: boolean;
-        backgroundColor?: [number, number, number];
-        up?: Vector3f32;
-    });
-    /**
-     * Load point cloud from file data
-     */
-    static load(fileData: ArrayBuffer): Promise<GenericGaussianPointCloud>;
-    private static arrayStartsWith;
-    /**
-     * Create from uncompressed Gaussian data
-     */
-    static fromGaussians(gaussians: Gaussian[], shCoefs: number[][][], // [point][coef][rgb]
-    shDeg: number, options?: {
-        kernelSize?: number;
-        mipSplatting?: boolean;
-        backgroundColor?: [number, number, number];
-        covars?: Covariance3D[];
-        quantization?: GaussianQuantization;
-    }): GenericGaussianPointCloud;
-    /**
-     * Create from compressed Gaussian data
-     */
-    static fromCompressedGaussians(gaussians: GaussianCompressed[], shCoefs: Uint8Array, shDeg: number, options?: {
-        kernelSize?: number;
-        mipSplatting?: boolean;
-        backgroundColor?: [number, number, number];
-        covars?: Covariance3D[];
-        quantization?: GaussianQuantization;
-    }): GenericGaussianPointCloud;
-    /**
-     * Get uncompressed Gaussians
-     */
-    getGaussians(): Gaussian[];
-    /**
-     * Get compressed Gaussians
-     */
-    getGaussiansCompressed(): GaussianCompressed[];
-    /**
-     * Get SH coefficients buffer
-     */
-    shCoefsBuffer(): Uint8Array;
-    /**
-     * Get Gaussian buffer
-     */
-    gaussianBuffer(): Uint8Array;
-    /**
-     * Check if compressed
-     */
-    isCompressed(): boolean;
+    private _gaussiansParsed;
+    static load(data: ArrayBuffer): GenericGaussianPointCloud;
+    static new(gaussians: Gaussian[], sh_coefs: SHBlock16[], sh_deg: number, num_points: number, kernel_size: number | null, mip_splatting: boolean | null, background_color: [number, number, number] | null, covars: Covariance3D[] | null, quantization: GaussianQuantization | null): GenericGaussianPointCloud;
+    static new_compressed(gaussians: GaussianCompressed[], sh_coefs_packed: Uint8Array, sh_deg: number, num_points: number, kernel_size: number | null, mip_splatting: boolean | null, background_color: [number, number, number] | null, covars: Covariance3D[] | null, quantization: GaussianQuantization | null): GenericGaussianPointCloud;
+    private constructor();
+    gaussians(): Gaussian[];
+    gaussians_compressed(): GaussianCompressed[];
+    sh_coefs_buffer(): Uint8Array;
+    gaussian_buffer(): Uint8Array;
+    compressed(): boolean;
 }
+export {};
 //# sourceMappingURL=mod.d.ts.map

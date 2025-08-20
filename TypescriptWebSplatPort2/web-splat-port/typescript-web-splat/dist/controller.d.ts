@@ -1,33 +1,32 @@
-/**
- * TypeScript port of controller.rs
- * Camera controller for user input handling
- */
-import { PerspectiveCamera, Point3f32, Vector3f32 } from './camera.js';
-/**
- * Camera controller for handling user input
- */
+import { vec3 } from 'gl-matrix';
+import { PerspectiveCamera } from './camera.js';
+/** Minimal KeyCode union to mirror the Rust winit::keyboard::KeyCode variants used */
+export type KeyCode = 'KeyW' | 'KeyS' | 'KeyA' | 'KeyD' | 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight' | 'KeyQ' | 'KeyE' | 'Space' | 'ShiftLeft';
 export declare class CameraController {
-    center: Point3f32;
-    up: Vector3f32 | null;
+    center: vec3;
+    up: vec3 | null;
     private amount;
     private shift;
     private rotation;
     private scroll;
     speed: number;
     sensitivity: number;
-    leftMousePressed: boolean;
-    rightMousePressed: boolean;
-    altPressed: boolean;
-    userInput: boolean;
+    left_mouse_pressed: boolean;
+    right_mouse_pressed: boolean;
+    alt_pressed: boolean;
+    user_inptut: boolean;
     constructor(speed: number, sensitivity: number);
-    processKeyboard(key: string, pressed: boolean): boolean;
-    processMouse(mouseDx: number, mouseDy: number): void;
-    processScroll(dy: number): void;
+    /** Returns true if the key was handled (matches Rust’s bool). */
+    process_keyboard(key: KeyCode, pressed: boolean): boolean;
+    /** mouse_dx/mouse_dy in pixels (same semantics as Rust). */
+    process_mouse(mouse_dx: number, mouse_dy: number): void;
+    process_scroll(dy: number): void;
+    /** Align controller to the camera’s current line of sight and adjust up. */
+    reset_to_camera(camera: PerspectiveCamera): void;
     /**
-     * Moves the controller center to the closest point on a line defined by the camera position and rotation
-     * Adjusts the controller up vector by projecting the current up vector onto the plane defined by the camera right vector
+     * Update camera given dt in seconds (1:1 with Duration semantics).
+     * Mutates camera position/rotation.
      */
-    resetToCamera(camera: PerspectiveCamera): void;
-    updateCamera(camera: PerspectiveCamera, dt: number): void;
+    update_camera(camera: PerspectiveCamera, dt_seconds: number): void;
 }
 //# sourceMappingURL=controller.d.ts.map

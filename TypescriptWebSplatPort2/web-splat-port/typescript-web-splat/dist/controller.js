@@ -1,11 +1,5 @@
-/**
- * TypeScript port of controller.rs
- * Camera controller for user input handling
- */
-import { mat3, quat, vec2, vec3 } from 'gl-matrix';
-/**
- * Camera controller for handling user input
- */
+// controller.ts
+import { vec2, vec3, mat3, quat } from 'gl-matrix';
 export class CameraController {
     center;
     up;
@@ -15,234 +9,197 @@ export class CameraController {
     scroll;
     speed;
     sensitivity;
-    leftMousePressed;
-    rightMousePressed;
-    altPressed;
-    userInput;
+    left_mouse_pressed;
+    right_mouse_pressed;
+    alt_pressed;
+    user_inptut; // keep original typo for 1:1 API
     constructor(speed, sensitivity) {
-        this.center = { x: 0, y: 0, z: 0 };
+        this.center = vec3.fromValues(0, 0, 0);
         this.up = null;
-        this.amount = { x: 0, y: 0, z: 0 };
-        this.shift = { x: 0, y: 0 };
-        this.rotation = { x: 0, y: 0, z: 0 };
+        this.amount = vec3.fromValues(0, 0, 0);
+        this.shift = vec2.fromValues(0, 0);
+        this.rotation = vec3.fromValues(0, 0, 0);
         this.scroll = 0.0;
         this.speed = speed;
         this.sensitivity = sensitivity;
-        this.leftMousePressed = false;
-        this.rightMousePressed = false;
-        this.altPressed = false;
-        this.userInput = false;
+        this.left_mouse_pressed = false;
+        this.right_mouse_pressed = false;
+        this.alt_pressed = false;
+        this.user_inptut = false;
     }
-    processKeyboard(key, pressed) {
+    /** Returns true if the key was handled (matches Rust’s bool). */
+    process_keyboard(key, pressed) {
         const amount = pressed ? 1.0 : 0.0;
         let processed = false;
         switch (key) {
             case 'KeyW':
             case 'ArrowUp':
-                this.amount.z += amount;
+                this.amount[2] += amount;
                 processed = true;
                 break;
             case 'KeyS':
             case 'ArrowDown':
-                this.amount.z += -amount;
+                this.amount[2] += -amount;
                 processed = true;
                 break;
             case 'KeyA':
             case 'ArrowLeft':
-                this.amount.x += -amount;
+                this.amount[0] += -amount;
                 processed = true;
                 break;
             case 'KeyD':
             case 'ArrowRight':
-                this.amount.x += amount;
+                this.amount[0] += amount;
                 processed = true;
                 break;
             case 'KeyQ':
-                this.rotation.z += amount / this.sensitivity;
+                this.rotation[2] += amount / this.sensitivity;
                 processed = true;
                 break;
             case 'KeyE':
-                this.rotation.z += -amount / this.sensitivity;
+                this.rotation[2] += -amount / this.sensitivity;
                 processed = true;
                 break;
             case 'Space':
-                this.amount.y += amount;
+                this.amount[1] += amount;
                 processed = true;
                 break;
             case 'ShiftLeft':
-                this.amount.y += -amount;
+                this.amount[1] += -amount;
                 processed = true;
                 break;
+            default:
+                processed = false;
         }
-        this.userInput = processed;
+        this.user_inptut = processed;
         return processed;
     }
-    processMouse(mouseDx, mouseDy) {
-        if (this.leftMousePressed) {
-            this.rotation.x += mouseDx;
-            this.rotation.y += mouseDy;
-            this.userInput = true;
+    /** mouse_dx/mouse_dy in pixels (same semantics as Rust). */
+    process_mouse(mouse_dx, mouse_dy) {
+        if (this.left_mouse_pressed) {
+            this.rotation[0] += mouse_dx;
+            this.rotation[1] += mouse_dy;
+            this.user_inptut = true;
         }
-        if (this.rightMousePressed) {
-            this.shift.y += -mouseDx;
-            this.shift.x += mouseDy;
-            this.userInput = true;
+        if (this.right_mouse_pressed) {
+            this.shift[1] += -mouse_dx;
+            this.shift[0] += mouse_dy;
+            this.user_inptut = true;
         }
     }
-    processScroll(dy) {
+    process_scroll(dy) {
         this.scroll += -dy;
-        this.userInput = true;
+        this.user_inptut = true;
+    }
+    /** Align controller to the camera’s current line of sight and adjust up. */
+    reset_to_camera(camera) {
+        const invView = quat.invert(quat.create(), camera.rotation);
+        const forward = vec3.transformQuat(vec3.create(), vec3.fromValues(0, 0, 1), invView);
+        const right = vec3.transformQuat(vec3.create(), vec3.fromValues(1, 0, 0), invView);
+        // Move center to closest point on the camera ray
+        this.center = closest_point(camera.position, forward, this.center);
+        // Adjust up vector by projecting it onto plane orthogonal to right
+        if (this.up) {
+            const projLen = vec3.dot(this.up, right) / vec3.dot(right, right);
+            const proj = vec3.scale(vec3.create(), right, projLen);
+            const newUp = vec3.normalize(vec3.create(), vec3.subtract(vec3.create(), this.up, proj));
+            this.up = newUp;
+        }
     }
     /**
-     * Moves the controller center to the closest point on a line defined by the camera position and rotation
-     * Adjusts the controller up vector by projecting the current up vector onto the plane defined by the camera right vector
+     * Update camera given dt in seconds (1:1 with Duration semantics).
+     * Mutates camera position/rotation.
      */
-    resetToCamera(camera) {
-        const invView = quat.create();
-        quat.invert(invView, camera.rotation);
-        const forward = vec3.create();
-        vec3.transformQuat(forward, [0, 0, 1], invView);
-        const right = vec3.create();
-        vec3.transformQuat(right, [1, 0, 0], invView);
-        // Move center point
-        this.center = closestPoint(camera.position, { x: forward[0], y: forward[1], z: forward[2] }, this.center);
-        // Adjust up vector by projecting it onto the plane defined by the right vector of the camera
-        if (this.up) {
-            const upVec = vec3.fromValues(this.up.x, this.up.y, this.up.z);
-            const rightVec = vec3.fromValues(right[0], right[1], right[2]);
-            // Project up onto right
-            const projection = vec3.create();
-            const dot = vec3.dot(upVec, rightVec);
-            vec3.scale(projection, rightVec, dot);
-            // Subtract projection from up
-            const newUp = vec3.create();
-            vec3.subtract(newUp, upVec, projection);
-            vec3.normalize(newUp, newUp);
-            this.up = { x: newUp[0], y: newUp[1], z: newUp[2] };
+    update_camera(camera, dt_seconds) {
+        const dt = dt_seconds;
+        // dir from center to camera
+        const dir = vec3.subtract(vec3.create(), camera.position, this.center);
+        const distance = Math.max(1e-12, vec3.length(dir));
+        // dir = normalize(dir) * exp( ln(distance) + scroll * dt * 10 * speed )
+        const newDist = Math.exp(Math.log(distance) + this.scroll * dt * 10.0 * this.speed);
+        const dirNorm = vec3.scale(vec3.create(), vec3.normalize(vec3.create(), dir), newDist);
+        // Basis from inverse view rotation
+        const invQ = quat.invert(quat.create(), camera.rotation);
+        const x_axis = vec3.transformQuat(vec3.create(), vec3.fromValues(1, 0, 0), invQ);
+        const y_axis = this.up
+            ? vec3.clone(this.up)
+            : vec3.transformQuat(vec3.create(), vec3.fromValues(0, 1, 0), invQ);
+        const z_axis = vec3.transformQuat(vec3.create(), vec3.fromValues(0, 0, 1), invQ);
+        // Pan (shift)
+        const panScale = dt * this.speed * 0.1 * distance;
+        const pan = vec3.create();
+        const sx = vec3.scale(vec3.create(), x_axis, this.shift[1] * panScale);
+        const sy = vec3.scale(vec3.create(), y_axis, -this.shift[0] * panScale);
+        vec3.add(pan, sx, sy);
+        vec3.add(this.center, this.center, pan);
+        vec3.add(camera.position, camera.position, pan);
+        // Rotations: theta around y_axis, phi around x_axis, eta around z_axis (ALT mode)
+        let theta = (this.rotation[0]) * dt * this.sensitivity;
+        let phi = (-this.rotation[1]) * dt * this.sensitivity;
+        let eta = 0.0;
+        if (this.alt_pressed) {
+            eta = -this.rotation[1] * dt * this.sensitivity;
+            theta = 0.0;
+            phi = 0.0;
         }
-    }
-    updateCamera(camera, dt) {
-        const dtSecs = dt / 1000; // Convert milliseconds to seconds
-        let dir = vec3.fromValues(camera.position.x - this.center.x, camera.position.y - this.center.y, camera.position.z - this.center.z);
-        const distance = vec3.length(dir);
-        // Update distance based on scroll
-        const newDistance = Math.exp(Math.log(distance) + this.scroll * dtSecs * 10 * this.speed);
-        vec3.normalize(dir, dir);
-        vec3.scale(dir, dir, newDistance);
-        // Get camera axes
-        const viewT = mat3.create();
-        mat3.fromQuat(viewT, camera.rotation);
-        mat3.invert(viewT, viewT);
-        const xAxis = vec3.fromValues(viewT[0], viewT[1], viewT[2]);
-        const yAxis = this.up ?
-            vec3.fromValues(this.up.x, this.up.y, this.up.z) :
-            vec3.fromValues(viewT[3], viewT[4], viewT[5]);
-        const zAxis = vec3.fromValues(viewT[6], viewT[7], viewT[8]);
-        // Calculate offset for panning
-        const offset = vec3.create();
-        const xOffset = vec3.create();
-        const yOffset = vec3.create();
-        vec3.scale(xOffset, xAxis, this.shift.y * dtSecs * this.speed * 0.1 * distance);
-        vec3.scale(yOffset, yAxis, -this.shift.x * dtSecs * this.speed * 0.1 * distance);
-        vec3.add(offset, xOffset, yOffset);
-        // Apply offset
-        this.center.x += offset[0];
-        this.center.y += offset[1];
-        this.center.z += offset[2];
-        camera.position.x += offset[0];
-        camera.position.y += offset[1];
-        camera.position.z += offset[2];
-        // Calculate rotation angles
-        let theta = this.rotation.x * dtSecs * this.sensitivity;
-        let phi = -this.rotation.y * dtSecs * this.sensitivity;
-        let eta = 0;
-        if (this.altPressed) {
-            eta = -this.rotation.y * dtSecs * this.sensitivity;
-            theta = 0;
-            phi = 0;
+        const qTheta = quat.setAxisAngle(quat.create(), normalizeSafe(y_axis), theta);
+        const qPhi = quat.setAxisAngle(quat.create(), normalizeSafe(x_axis), phi);
+        const qEta = quat.setAxisAngle(quat.create(), normalizeSafe(z_axis), eta);
+        // rot = rot_theta * rot_phi * rot_eta
+        const rot = quat.multiply(quat.create(), quat.multiply(quat.create(), qTheta, qPhi), qEta);
+        // new_dir = rot * dirNorm
+        const new_dir = vec3.transformQuat(vec3.create(), dirNorm, rot);
+        // avoid near-up singularity
+        if (angle_short(y_axis, new_dir) < 0.1) {
+            // keep original dir if too close
+            vec3.copy(new_dir, dirNorm);
         }
-        // Create rotation quaternions
-        const rotTheta = quat.create();
-        const rotPhi = quat.create();
-        const rotEta = quat.create();
-        quat.setAxisAngle(rotTheta, yAxis, theta);
-        quat.setAxisAngle(rotPhi, xAxis, phi);
-        quat.setAxisAngle(rotEta, zAxis, eta);
-        // Combine rotations
-        const rot = quat.create();
-        quat.multiply(rot, rotTheta, rotPhi);
-        quat.multiply(rot, rot, rotEta);
-        // Apply rotation to direction
-        const newDir = vec3.create();
-        vec3.transformQuat(newDir, dir, rot);
-        // Check if we're too close to the up vector
-        if (angleShort(yAxis, newDir) < 0.1) {
-            vec3.copy(newDir, dir);
-        }
-        // Update camera position
-        camera.position.x = this.center.x + newDir[0];
-        camera.position.y = this.center.y + newDir[1];
-        camera.position.z = this.center.z + newDir[2];
-        // Update camera rotation using lookAt
-        const negNewDir = vec3.create();
-        vec3.negate(negNewDir, newDir);
-        // Create look-at quaternion
-        const forward = vec3.create();
-        vec3.normalize(forward, negNewDir);
-        const right = vec3.create();
-        vec3.cross(right, forward, yAxis);
-        vec3.normalize(right, right);
-        const up = vec3.create();
-        vec3.cross(up, right, forward);
-        const rotMatrix = mat3.fromValues(right[0], up[0], -forward[0], right[1], up[1], -forward[1], right[2], up[2], -forward[2]);
-        quat.fromMat3(camera.rotation, rotMatrix);
-        // Apply decay based on framerate (60 FPS reference)
-        let decay = Math.pow(0.8, dtSecs * 60);
-        if (decay < 1e-4) {
-            decay = 0;
-        }
-        this.rotation.x *= decay;
-        this.rotation.y *= decay;
-        this.rotation.z *= decay;
-        if (vec3.length([this.rotation.x, this.rotation.y, this.rotation.z]) < 1e-4) {
-            this.rotation = { x: 0, y: 0, z: 0 };
-        }
-        this.shift.x *= decay;
-        this.shift.y *= decay;
-        if (vec2.length([this.shift.x, this.shift.y]) < 1e-4) {
-            this.shift = { x: 0, y: 0 };
-        }
+        // position and orientation
+        vec3.add(camera.position, this.center, new_dir);
+        camera.rotation = lookRotation(vec3.scale(vec3.create(), new_dir, -1), y_axis); // look along -new_dir with up=y_axis
+        // Exponential decay based on FPS ~60
+        let decay = Math.pow(0.8, dt * 60.0);
+        if (decay < 1e-4)
+            decay = 0.0;
+        vec3.scale(this.rotation, this.rotation, decay);
+        if (vec3.length(this.rotation) < 1e-4)
+            vec3.set(this.rotation, 0, 0, 0);
+        vec2.scale(this.shift, this.shift, decay);
+        if (vec2.length(this.shift) < 1e-4)
+            vec2.set(this.shift, 0, 0);
         this.scroll *= decay;
-        if (Math.abs(this.scroll) < 1e-4) {
-            this.scroll = 0;
-        }
-        this.userInput = false;
+        if (Math.abs(this.scroll) < 1e-4)
+            this.scroll = 0.0;
+        this.user_inptut = false;
     }
 }
-/**
- * Find the closest point on a line to a given point
- */
-function closestPoint(orig, dir, point) {
-    const dirVec = vec3.fromValues(dir.x, dir.y, dir.z);
-    vec3.normalize(dirVec, dirVec);
-    const lhs = vec3.fromValues(point.x - orig.x, point.y - orig.y, point.z - orig.z);
-    const dotP = vec3.dot(lhs, dirVec);
-    return {
-        x: orig.x + dirVec[0] * dotP,
-        y: orig.y + dirVec[1] * dotP,
-        z: orig.z + dirVec[2] * dotP
-    };
+/* ----------------------------- helpers (1:1) ----------------------------- */
+function closest_point(orig, dir, point) {
+    const d = normalizeSafe(dir);
+    const lhs = vec3.subtract(vec3.create(), point, orig);
+    const dot_p = vec3.dot(lhs, d);
+    const out = vec3.scaleAndAdd(vec3.create(), orig, d, dot_p);
+    return out;
 }
-/**
- * Calculate the shorter angle between two vectors
- */
-function angleShort(a, b) {
-    const angle = Math.acos(Math.max(-1, Math.min(1, vec3.dot(a, b) / (vec3.length(a) * vec3.length(b)))));
-    if (angle > Math.PI / 2) {
-        return Math.PI - angle;
-    }
-    else {
-        return angle;
-    }
+function angle_short(a, b) {
+    const na = normalizeSafe(a);
+    const nb = normalizeSafe(b);
+    const dot = Math.min(1, Math.max(-1, vec3.dot(na, nb)));
+    const angle = Math.acos(dot);
+    return angle > Math.PI / 2 ? Math.PI - angle : angle;
+}
+function normalizeSafe(v) {
+    const len = vec3.length(v);
+    return len > 0 ? vec3.scale(vec3.create(), v, 1 / len) : vec3.fromValues(0, 0, 0);
+}
+/** Quaternion that makes -Z look along `forward` with the given `up`. */
+function lookRotation(forward, up) {
+    const f = normalizeSafe(forward);
+    const r = normalizeSafe(vec3.cross(vec3.create(), up, f));
+    const u = vec3.cross(vec3.create(), f, r);
+    // Column-major mat3 (gl-matrix): columns are r, u, f
+    const m = mat3.fromValues(r[0], r[1], r[2], u[0], u[1], u[2], f[0], f[1], f[2]);
+    const q = quat.fromMat3(quat.create(), m);
+    return quat.normalize(q, q);
 }
 //# sourceMappingURL=controller.js.map

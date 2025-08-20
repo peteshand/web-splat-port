@@ -5,7 +5,8 @@
   "main": "dist/lib.js",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "_build": "tsc",
+    "build": "esbuild src/lib.ts --bundle --format=esm --platform=browser --sourcemap --outfile=dist/web_splat.js",
     "dev": "tsc --watch",
     "serve": "http-server dist -p 8080",
     "clean": "rm -rf dist"
@@ -20,8 +21,9 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@webgpu/types": "^0.1.44",
-    "typescript": "^5.0.0",
-    "http-server": "^14.1.1"
+    "esbuild": "^0.25.9",
+    "http-server": "^14.1.1",
+    "typescript": "^5.0.0"
   },
   "keywords": [
     "3d",

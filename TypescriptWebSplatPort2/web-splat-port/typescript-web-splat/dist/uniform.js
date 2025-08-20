@@ -1,146 +1,119 @@
-/**
- * TypeScript port of uniform.rs
- * Manages uniform buffers for WebGPU
- */
+// uniform.ts
+// 1:1 port of uniform.rs for WebGPU (browser/wasm)
 export class UniformBuffer {
-    buffer;
-    data;
-    label;
-    bindGroup;
-    constructor(device, data, label) {
-        this.data = data;
-        this.label = label || null;
-        // Create buffer with data
-        const dataArray = this.castToBytes(data);
-        // WebGPU requires uniform buffer sizes to be multiples of 4. Many platforms also
-        // expect 256-byte alignment for uniform buffers. Pad to 256 to be safe.
-        const paddedSize = Math.ceil(dataArray.byteLength / 256) * 256;
-        this.buffer = device.createBuffer({
-            label: label,
-            size: paddedSize,
+    _buffer;
+    _data;
+    _label;
+    _bind_group;
+    // ---- new_default ----
+    static newDefault(device, label, byteLength = 256) {
+        const buffer = device.createBuffer({
+            label,
+            size: byteLength,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             mappedAtCreation: true
         });
-        // Write initial data (rest remains zero-initialized)
-        new Uint8Array(this.buffer.getMappedRange()).set(dataArray);
-        this.buffer.unmap();
-        // Create bind group
+        new Uint8Array(buffer.getMappedRange()).fill(0);
+        buffer.unmap();
         const bgLabel = label ? `${label} bind group` : undefined;
-        this.bindGroup = device.createBindGroup({
+        const bind_group = device.createBindGroup({
             label: bgLabel,
             layout: UniformBuffer.bindGroupLayout(device),
-            entries: [{
-                    binding: 0,
-                    resource: {
-                        buffer: this.buffer
-                    }
-                }]
+            entries: [{ binding: 0, resource: { buffer } }]
         });
+        // no default T in TS; keep undefined until user sets data
+        return new UniformBuffer(buffer, undefined, label, bind_group);
     }
-    static newDefault(device, defaultData, label) {
-        return new UniformBuffer(device, defaultData, label);
-    }
+    // ---- new ----
     static new(device, data, label) {
-        return new UniformBuffer(device, data, label);
+        const buffer = device.createBuffer({
+            label,
+            size: data.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true
+        });
+        new Uint8Array(buffer.getMappedRange()).set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        buffer.unmap();
+        const bgLabel = label ? `${label} bind group` : undefined;
+        const bind_group = device.createBindGroup({
+            label: bgLabel,
+            layout: UniformBuffer.bindGroupLayout(device),
+            entries: [{ binding: 0, resource: { buffer } }]
+        });
+        return new UniformBuffer(buffer, data, label, bind_group);
     }
-    getBuffer() {
-        return this.buffer;
+    constructor(buffer, data, label, bind_group) {
+        this._buffer = buffer;
+        this._data = data;
+        this._label = label;
+        this._bind_group = bind_group;
     }
-    getData() {
-        return this.data;
+    /* ----------------------------- Rust-style API ----------------------------- */
+    // buffer(&self) -> &wgpu::Buffer
+    buffer() { return this._buffer; }
+    // data(&self) -> &T
+    data() { return this._data; }
+    // pub fn bind_group_layout(device: &Device) -> BindGroupLayout
+    static bind_group_layout(device) {
+        return this.bindGroupLayout(device);
     }
-    getBindGroup() {
-        return this.bindGroup;
+    // pub fn binding_type() -> BindingType
+    static binding_type() {
+        return this.bindingType();
     }
+    // pub fn sync(&mut self, queue: &Queue)
+    sync(queue) {
+        const v = this._data;
+        if (!v || !(v.buffer instanceof ArrayBuffer || typeof SharedArrayBuffer !== 'undefined' && v.buffer instanceof SharedArrayBuffer)) {
+            throw new Error('UniformBuffer.sync(): data is not an ArrayBufferView. Provide bytes or use setData(bytes) first.');
+        }
+        // Use the ArrayBuffer overload to satisfy lib.dom WebGPU types
+        queue.writeBuffer(this._buffer, 0, v.buffer, v.byteOffset, v.byteLength);
+    }
+    // pub fn clone(&self, device: &Device, queue: &Queue) -> Self
+    clone(device, queue) {
+        const buffer = device.createBuffer({
+            label: this._label,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            size: this._buffer.size,
+            mappedAtCreation: false
+        });
+        const encoder = device.createCommandEncoder({ label: 'copy uniform buffer encode' });
+        encoder.copyBufferToBuffer(this._buffer, 0, buffer, 0, this._buffer.size);
+        queue.submit([encoder.finish()]);
+        const bind_group = device.createBindGroup({
+            label: 'uniform bind group',
+            layout: UniformBuffer.bindGroupLayout(device),
+            entries: [{ binding: 0, resource: { buffer } }]
+        });
+        return new UniformBuffer(buffer, this._data, this._label, bind_group);
+    }
+    // pub fn bind_group(&self) -> &wgpu::BindGroup
+    bind_group() { return this._bind_group; }
+    /* --------------------------- TS-friendly aliases -------------------------- */
+    bufferRef() { return this._buffer; }
+    dataRef() { return this._data; }
+    getBindGroup() { return this._bind_group; }
+    setData(bytes) {
+        this._data = bytes;
+    }
+    /* --------------------------- Layout helpers (TS) -------------------------- */
     static bindGroupLayout(device) {
         return device.createBindGroupLayout({
-            label: "uniform bind group layout",
+            label: 'uniform bind group layout',
             entries: [{
                     binding: 0,
                     visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "uniform",
-                        hasDynamicOffset: false,
-                        minBindingSize: undefined // Will be determined by buffer size
-                    }
+                    buffer: UniformBuffer.bindingType()
                 }]
         });
-    }
-    /**
-     * Uploads data from CPU to GPU if necessary
-     */
-    sync(queue) {
-        // For now, we'll use a simplified approach
-        // In a full implementation, this would serialize the data properly
-        const data = new ArrayBuffer(256); // Placeholder size
-        queue.writeBuffer(this.buffer, 0, data);
     }
     static bindingType() {
         return {
-            type: "uniform",
-            hasDynamicOffset: false,
-            minBindingSize: undefined
+            type: 'uniform',
+            hasDynamicOffset: false
+            // minBindingSize: can be set if you want strict validation
         };
-    }
-    clone(device, queue) {
-        // Create new buffer with same size
-        const newBuffer = device.createBuffer({
-            label: this.label || undefined,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            size: this.buffer.size,
-            mappedAtCreation: false
-        });
-        // Copy buffer contents
-        const encoder = device.createCommandEncoder({
-            label: "copy uniform buffer encoder"
-        });
-        encoder.copyBufferToBuffer(this.buffer, 0, newBuffer, 0, this.buffer.size);
-        queue.submit([encoder.finish()]);
-        // Create new bind group
-        const bindGroup = device.createBindGroup({
-            label: "uniform bind group",
-            layout: UniformBuffer.bindGroupLayout(device),
-            entries: [{
-                    binding: 0,
-                    resource: {
-                        buffer: newBuffer
-                    }
-                }]
-        });
-        // Create new instance with copied data
-        const cloned = Object.create(UniformBuffer.prototype);
-        cloned.buffer = newBuffer;
-        cloned.data = { ...this.data }; // Shallow clone of data
-        cloned.label = this.label;
-        cloned.bindGroup = bindGroup;
-        return cloned;
-    }
-    /**
-     * Get mutable reference to data (equivalent to AsMut<T>)
-     */
-    asMut() {
-        return this.data;
-    }
-    /**
-     * Convert data to byte array for GPU buffer
-     * This is equivalent to bytemuck::cast_slice in Rust
-     */
-    castToBytes(data) {
-        // For simple numeric types, convert to ArrayBuffer
-        if (typeof data === 'number') {
-            const buffer = new ArrayBuffer(4);
-            new Float32Array(buffer)[0] = data;
-            return new Uint8Array(buffer);
-        }
-        // For objects with numeric properties, serialize to bytes
-        if (typeof data === 'object' && data !== null) {
-            // This is a simplified implementation - in practice, you'd need
-            // proper serialization based on the specific data structure
-            const json = JSON.stringify(data);
-            const encoder = new TextEncoder();
-            return encoder.encode(json);
-        }
-        throw new Error('Unsupported data type for GPU buffer');
     }
 }
 //# sourceMappingURL=uniform.js.map

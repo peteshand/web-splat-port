@@ -1,25 +1,20 @@
 import { GenericGaussianPointCloud, PointCloudReader } from './mod.js';
 export declare class PlyReader implements PointCloudReader {
     private header;
-    private data;
-    private dataView;
+    private dv;
     private offset;
-    private shDeg;
-    private numPoints;
-    private mipSplatting?;
-    private kernelSize?;
-    private backgroundColor?;
-    constructor(data: ArrayBuffer);
-    private parseHeader;
-    private readFloat32;
-    private readLine;
-    private fileShDeg;
-    private getNumPoints;
-    private getMipSplatting;
-    private getKernelSize;
-    private getBackgroundColor;
+    private sh_deg;
+    private num_points;
+    private mip_splatting;
+    private kernel_size;
+    private background_color;
+    constructor(reader: ArrayBuffer);
+    static new(reader: ArrayBuffer): PlyReader;
+    static magic_bytes(): Uint8Array;
+    static file_ending(): string;
     read(): GenericGaussianPointCloud;
-    static magicBytes(): Uint8Array;
-    static fileEnding(): string;
+    private read_line;
+    private readF32;
+    static magic_bytes_ts(): Uint8Array;
 }
 //# sourceMappingURL=ply.d.ts.map

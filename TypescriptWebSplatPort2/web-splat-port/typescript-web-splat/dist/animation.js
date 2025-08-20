@@ -1,265 +1,180 @@
-/**
- * TypeScript port of animation.rs
- * Animation system with interpolation and spline support
- */
-import { quat } from 'gl-matrix';
+// animation.ts
+import { quat, vec3 } from 'gl-matrix';
 import { PerspectiveCamera, PerspectiveProjection } from './camera.js';
-/**
- * Interpolation types
- */
-export var InterpolationType;
-(function (InterpolationType) {
-    InterpolationType[InterpolationType["Step"] = 0] = "Step";
-    InterpolationType[InterpolationType["Linear"] = 1] = "Linear";
-    InterpolationType[InterpolationType["Cosine"] = 2] = "Cosine";
-    InterpolationType[InterpolationType["CatmullRom"] = 3] = "CatmullRom";
-    InterpolationType[InterpolationType["CubicBezier"] = 4] = "CubicBezier";
-})(InterpolationType || (InterpolationType = {}));
-/**
- * Simple transition between two values
- */
+/** 1:1 with the Rust struct */
 export class Transition {
     from;
     to;
-    interpFn;
-    constructor(from, to, interpFn) {
+    interp_fn;
+    constructor(from, to, interp_fn) {
         this.from = from;
         this.to = to;
-        this.interpFn = interpFn;
+        this.interp_fn = interp_fn;
+    }
+    static new(from, to, interp_fn) {
+        return new Transition(from, to, interp_fn);
     }
     sample(v) {
-        return this.from.lerp(this.to, this.interpFn(v));
+        return this.from.lerp(this.to, this.interp_fn(v));
     }
 }
-/**
- * Simple spline implementation for camera tracking shots
- */
-export class Spline {
+/** 1:1 with the Rust struct; Catmull–Rom spline over PerspectiveCamera */
+export class TrackingShot {
     keys;
     constructor(keys) {
-        this.keys = keys.sort((a, b) => a.t - b.t);
+        this.keys = keys;
     }
-    static fromCameras(cameras) {
-        const keys = [];
-        // Add padding cameras for smooth interpolation
-        const lastTwo = cameras.slice(-2);
-        const firstTwo = cameras.slice(0, 2);
-        const allCameras = [...lastTwo, ...cameras, ...firstTwo];
-        allCameras.forEach((camera, i) => {
-            const t = (i - 1) / cameras.length;
-            keys.push({
-                t,
-                value: camera,
-                interpolation: InterpolationType.CatmullRom
-            });
-        });
-        return new Spline(keys);
+    /** Rust: TrackingShot::from_cameras */
+    static from_cameras(cameras) {
+        const n = cameras.length;
+        if (n < 2) {
+            throw new Error('TrackingShot requires at least 2 cameras');
+        }
+        // last_two, cameras, first_two (closed loop like the Rust code)
+        const last_two = [cameras[n - 2], cameras[n - 1]];
+        const first_two = [cameras[0], cameras[1]];
+        const seq = [...last_two, ...cameras, ...first_two];
+        // times: v = (i as f32 - 1.) / len
+        const keys = seq.map((cam, i) => ({
+            t: (i - 1) / n,
+            v: cam,
+        }));
+        return new TrackingShot(keys);
     }
-    sample(t) {
-        if (this.keys.length === 0)
-            return null;
-        if (this.keys.length === 1)
-            return this.keys[0].value;
-        // Clamp t to valid range
-        t = Math.max(0, Math.min(1, t));
-        // Find surrounding keys
-        let i = 0;
-        while (i < this.keys.length - 1 && this.keys[i + 1].t <= t) {
-            i++;
-        }
-        if (i === this.keys.length - 1) {
-            return this.keys[i].value;
-        }
-        const key1 = this.keys[i];
-        const key2 = this.keys[i + 1];
-        const localT = (t - key1.t) / (key2.t - key1.t);
-        // Simple linear interpolation for now
-        // In a full implementation, you'd handle different interpolation types
-        if (key1.value instanceof PerspectiveCamera && key2.value instanceof PerspectiveCamera) {
-            return key1.value.lerp(key2.value, localT);
-        }
-        return key1.value;
-    }
-    get length() {
+    /** Rust: num_control_points() */
+    num_control_points() {
         return this.keys.length;
     }
-}
-/**
- * Camera tracking shot using splines
- */
-export class TrackingShot {
-    spline;
-    constructor(cameras) {
-        this.spline = Spline.fromCameras(cameras);
-    }
-    static fromCameras(cameras) {
-        return new TrackingShot(cameras);
-    }
+    /** Rust: impl Sampler for TrackingShot { fn sample(&self, v: f32) -> PerspectiveCamera } */
     sample(v) {
-        const result = this.spline.sample(v);
-        if (!result) {
-            throw new Error(`Spline sample failed at ${v}`);
-        }
-        return result;
+        // Wrap v into [0,1)
+        const n = this.segment_count();
+        const u = ((v % 1) + 1) % 1;
+        // map u in [0,1) to segment index i in [0..n-1], local t in [0,1)
+        const s = u * n + 1; // +1 because keys are shifted by one (see Rust construction)
+        const i = Math.floor(s);
+        const t = s - i;
+        const x = this.keys[i - 1].v; // P(i-1)
+        const a = this.keys[i].v; // P(i)
+        const b = this.keys[i + 1].v; // P(i+1)
+        const y = this.keys[i + 2].v; // P(i+2)
+        return cubicHermiteCamera(x, a, b, y, t);
     }
-    numControlPoints() {
-        return this.spline.length;
-    }
-}
-/**
- * PerspectiveCamera interpolation implementation
- */
-export class PerspectiveCameraInterpolate {
-    step(t, threshold, a, b) {
-        return t < threshold ? a : b;
-    }
-    lerp(t, a, b) {
-        return a.lerp(b, t);
-    }
-    cosine(t, a, b) {
-        throw new Error('Cosine interpolation not implemented');
-    }
-    cubicHermite(t, x, a, b, y) {
-        // Unroll quaternion rotations for shortest path
-        const rotations = [x[1].rotation, a[1].rotation, b[1].rotation, y[1].rotation];
-        const unrolledRotations = this.unrollQuaternions(rotations);
-        // Interpolate position
-        const positions = [
-            [x[1].position.x, x[1].position.y, x[1].position.z],
-            [a[1].position.x, a[1].position.y, a[1].position.z],
-            [b[1].position.x, b[1].position.y, b[1].position.z],
-            [y[1].position.x, y[1].position.y, y[1].position.z]
-        ];
-        const newPosition = this.cubicHermiteVec3(t, [x[0], positions[0]], [a[0], positions[1]], [b[0], positions[2]], [y[0], positions[3]]);
-        // Interpolate rotation
-        const newRotation = this.cubicHermiteQuat(t, [x[0], unrolledRotations[0]], [a[0], unrolledRotations[1]], [b[0], unrolledRotations[2]], [y[0], unrolledRotations[3]]);
-        quat.normalize(newRotation, newRotation);
-        // Interpolate projection
-        const newProjection = new PerspectiveProjectionInterpolate().cubicHermite(t, [x[0], x[1].projection], [a[0], a[1].projection], [b[0], b[1].projection], [y[0], y[1].projection]);
-        return new PerspectiveCamera({ x: newPosition[0], y: newPosition[1], z: newPosition[2] }, newRotation, newProjection);
-    }
-    quadraticBezier(t, a, u, b) {
-        throw new Error('Quadratic Bezier interpolation not implemented');
-    }
-    cubicBezier(t, a, u, v, b) {
-        throw new Error('Cubic Bezier interpolation not implemented');
-    }
-    cubicBezierMirrored(t, a, u, v, b) {
-        throw new Error('Cubic Bezier mirrored interpolation not implemented');
-    }
-    unrollQuaternions(rotations) {
-        const result = rotations.map(q => quat.clone(q));
-        if (result[0][3] < 0) { // w component
-            quat.scale(result[0], result[0], -1);
-        }
-        for (let i = 1; i < 4; i++) {
-            if (quat.dot(result[i], result[i - 1]) < 0) {
-                quat.scale(result[i], result[i], -1);
-            }
-        }
-        return result;
-    }
-    cubicHermiteVec3(t, x, a, b, y) {
-        // Simplified cubic hermite interpolation for vec3
-        const t2 = t * t;
-        const t3 = t2 * t;
-        const h1 = 2 * t3 - 3 * t2 + 1;
-        const h2 = -2 * t3 + 3 * t2;
-        const h3 = t3 - 2 * t2 + t;
-        const h4 = t3 - t2;
-        return [
-            h1 * a[1][0] + h2 * b[1][0] + h3 * (b[1][0] - x[1][0]) + h4 * (y[1][0] - a[1][0]),
-            h1 * a[1][1] + h2 * b[1][1] + h3 * (b[1][1] - x[1][1]) + h4 * (y[1][1] - a[1][1]),
-            h1 * a[1][2] + h2 * b[1][2] + h3 * (b[1][2] - x[1][2]) + h4 * (y[1][2] - a[1][2])
-        ];
-    }
-    cubicHermiteQuat(t, x, a, b, y) {
-        // Simplified quaternion interpolation - use slerp between a and b
-        const result = quat.create();
-        quat.slerp(result, a[1], b[1], t);
-        return result;
+    segment_count() {
+        // original camera count == keys.length - 4
+        return this.keys.length - 4;
     }
 }
-/**
- * PerspectiveProjection interpolation implementation
- */
-export class PerspectiveProjectionInterpolate {
-    step(t, threshold, a, b) {
-        return t < threshold ? a : b;
-    }
-    lerp(t, a, b) {
-        return a.lerp(b, t);
-    }
-    cosine(t, a, b) {
-        throw new Error('Cosine interpolation not implemented');
-    }
-    cubicHermite(t, x, a, b, y) {
-        const cubicHermiteFloat = (t, x, a, b, y) => {
-            const t2 = t * t;
-            const t3 = t2 * t;
-            const h1 = 2 * t3 - 3 * t2 + 1;
-            const h2 = -2 * t3 + 3 * t2;
-            const h3 = t3 - 2 * t2 + t;
-            const h4 = t3 - t2;
-            return h1 * a + h2 * b + h3 * (b - x) + h4 * (y - a);
-        };
-        return new PerspectiveProjection(cubicHermiteFloat(t, x[1].fovx, a[1].fovx, b[1].fovx, y[1].fovx), cubicHermiteFloat(t, x[1].fovy, a[1].fovy, b[1].fovy, y[1].fovy), cubicHermiteFloat(t, x[1].znear, a[1].znear, b[1].znear, y[1].znear), cubicHermiteFloat(t, x[1].zfar, a[1].zfar, b[1].zfar, y[1].zfar), cubicHermiteFloat(t, x[1].fov2viewRatio, a[1].fov2viewRatio, b[1].fov2viewRatio, y[1].fov2viewRatio));
-    }
-    quadraticBezier(t, a, u, b) {
-        throw new Error('Quadratic Bezier interpolation not implemented');
-    }
-    cubicBezier(t, a, u, v, b) {
-        throw new Error('Cubic Bezier interpolation not implemented');
-    }
-    cubicBezierMirrored(t, a, u, v, b) {
-        throw new Error('Cubic Bezier mirrored interpolation not implemented');
-    }
-}
-/**
- * Generic animation class
- */
+/** 1:1 with the Rust struct (seconds, like Duration::as_secs_f32) */
 export class Animation {
-    duration; // Duration in milliseconds
-    timeLeft;
+    duration_s;
+    time_left_s;
     looping;
     sampler;
     constructor(duration, looping, sampler) {
-        this.duration = duration;
-        this.timeLeft = duration;
+        this.duration_s = duration;
+        this.time_left_s = duration;
         this.looping = looping;
         this.sampler = sampler;
     }
-    done() {
-        if (this.looping) {
-            return false;
-        }
-        return this.timeLeft <= 0;
+    static new(duration, looping, sampler) {
+        return new Animation(duration, looping, sampler);
     }
+    done() {
+        return this.looping ? false : this.time_left_s <= 0;
+    }
+    /** dt is in seconds */
     update(dt) {
-        this.timeLeft -= dt;
-        if (this.timeLeft <= 0) {
+        const new_left = this.time_left_s - dt;
+        if (new_left >= 0) {
+            this.time_left_s = new_left;
+        }
+        else {
             if (this.looping) {
-                this.timeLeft = this.duration + this.timeLeft;
+                // duration + time_left - dt  (Rust behavior)
+                this.time_left_s = this.duration_s + this.time_left_s - dt;
+                // keep it in [0,duration]
+                this.time_left_s = ((this.time_left_s % this.duration_s) + this.duration_s) % this.duration_s;
             }
             else {
-                this.timeLeft = 0;
+                this.time_left_s = 0;
             }
         }
         return this.sampler.sample(this.progress());
     }
     progress() {
-        return 1 - this.timeLeft / this.duration;
+        return 1 - this.time_left_s / this.duration_s;
     }
-    setProgress(v) {
-        this.timeLeft = this.duration * (1 - v);
+    set_progress(v) {
+        this.time_left_s = this.duration_s * (1 - v);
     }
-    getDuration() {
-        return this.duration;
+    duration() {
+        return this.duration_s;
     }
-    setDuration(duration) {
-        const progress = this.progress();
-        this.duration = duration;
-        this.setProgress(progress);
+    set_duration(duration) {
+        const p = this.progress();
+        this.duration_s = duration;
+        this.set_progress(p);
     }
+}
+/* ------------------------- Helpers to mirror Rust impls ------------------------- */
+/** Unroll quaternion sequence to ensure shortest path (sign flip if dot < 0). */
+export function unroll(rot) {
+    const r0 = quat.clone(rot[0]);
+    if (r0[3] < 0)
+        quat.scale(r0, r0, -1);
+    const out = [r0, quat.clone(rot[1]), quat.clone(rot[2]), quat.clone(rot[3])];
+    for (let i = 1; i < 4; i++) {
+        if (quat.dot(out[i], out[i - 1]) < 0) {
+            quat.scale(out[i], out[i], -1);
+        }
+    }
+    return out;
+}
+/** Catmull–Rom (uniform) cubic Hermite for scalars */
+function cr1(a, b, c, d, t) {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const m0 = (c - a) * 0.5;
+    const m1 = (d - b) * 0.5;
+    return (2 * t3 - 3 * t2 + 1) * b + (t3 - 2 * t2 + t) * m0 + (-2 * t3 + 3 * t2) * c + (t3 - t2) * m1;
+}
+/** Catmull–Rom for vec3 (component-wise) */
+function crVec3(a, b, c, d, t) {
+    const out = vec3.create();
+    out[0] = cr1(a[0], b[0], c[0], d[0], t);
+    out[1] = cr1(a[1], b[1], c[1], d[1], t);
+    out[2] = cr1(a[2], b[2], c[2], d[2], t);
+    return out;
+}
+/** Catmull–Rom for quat (component-wise Hermite + normalize), after unroll */
+function crQuat(a, b, c, d, t) {
+    const out = quat.create();
+    out[0] = cr1(a[0], b[0], c[0], d[0], t);
+    out[1] = cr1(a[1], b[1], c[1], d[1], t);
+    out[2] = cr1(a[2], b[2], c[2], d[2], t);
+    out[3] = cr1(a[3], b[3], c[3], d[3], t);
+    return quat.normalize(out, out);
+}
+/** Catmull–Rom for PerspectiveProjection (component-wise) */
+function crProjection(x, a, b, y, t) {
+    // fields: fovx, fovy, znear, zfar, fov2view_ratio
+    const fovx = cr1(x.fovx, a.fovx, b.fovx, y.fovx, t);
+    const fovy = cr1(x.fovy, a.fovy, b.fovy, y.fovy, t);
+    const znear = cr1(x.znear, a.znear, b.znear, y.znear, t);
+    const zfar = cr1(x.zfar, a.zfar, b.zfar, y.zfar, t);
+    const ratio = cr1(x.fov2view_ratio, a.fov2view_ratio, b.fov2view_ratio, y.fov2view_ratio, t);
+    return new PerspectiveProjection(fovx, fovy, znear, zfar, ratio);
+}
+/** Mirror of the Rust `Interpolate::cubic_hermite` for PerspectiveCamera */
+function cubicHermiteCamera(x, a, b, y, t) {
+    // position CR
+    const pos = crVec3(x.position, a.position, b.position, y.position, t);
+    // quaternion unroll + CR (component-wise) + normalize
+    const [q0, q1, q2, q3] = unroll([x.rotation, a.rotation, b.rotation, y.rotation]);
+    const rot = crQuat(q0, q1, q2, q3, t);
+    // projection CR
+    const proj = crProjection(x.projection, a.projection, b.projection, y.projection, t);
+    return new PerspectiveCamera(pos, rot, proj);
 }
 //# sourceMappingURL=animation.js.map

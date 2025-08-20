@@ -1,533 +1,362 @@
-/**
- * TypeScript port of pointcloud.rs
- * Point cloud data structures and GPU buffer management
- */
+// pointcloud.ts
+// 1:1 port of pointcloud.rs to WebGPU (TypeScript)
 
-import { vec2, vec3, vec4 } from 'gl-matrix';
-import { UniformBuffer } from './uniform.js';
+import { UniformBuffer } from './uniform';
 
-// Point3 type equivalent to cgmath::Point3<f16>
-export interface Point3f16 {
-    x: number; // f16 represented as number
-    y: number;
-    z: number;
-}
+// ---- Types mirroring the Rust structs (for clarity; buffers are passed as bytes) ----
+export type Vec3 = { x: number; y: number; z: number };
+export type Color3 = [number, number, number];
 
-// Point3 type equivalent to cgmath::Point3<f32>
-export interface Point3f32 {
-    x: number;
-    y: number;
-    z: number;
-}
+// ---- 1:1 Rust type mirrors we need to export ----
+export type Point3f32 = { x: number; y: number; z: number };
+export type Vector3f32 = { x: number; y: number; z: number };
 
-// Vector3 type equivalent to cgmath::Vector3<f32>
-export interface Vector3f32 {
-    x: number;
-    y: number;
-    z: number;
-}
-
-// Vector2 type equivalent to cgmath::Vector2<f16>
-export interface Vector2f16 {
-    x: number;
-    y: number;
-}
-
-// Vector4 type equivalent to cgmath::Vector4<f16>
-export interface Vector4f16 {
-    x: number;
-    y: number;
-    z: number;
-    w: number;
-}
-
-/**
- * Compressed Gaussian representation
- * #[repr(C)] equivalent
- */
-export interface GaussianCompressed {
-    xyz: Point3f16;
-    opacity: number; // i8
-    scaleFactor: number; // i8
-    geometryIdx: number; // u32
-    shIdx: number; // u32
-}
-
-export function createDefaultGaussianCompressed(): GaussianCompressed {
-    return {
-        xyz: { x: 0, y: 0, z: 0 },
-        opacity: 0,
-        scaleFactor: 0,
-        geometryIdx: 0,
-        shIdx: 0
-    };
-}
-
-/**
- * Uncompressed Gaussian representation
- * #[repr(C)] equivalent
- */
-export interface Gaussian {
-    xyz: Point3f16;
+export type Gaussian = {
+    // Rust: Point3<f16> for xyz; we store as numbers and pack to f16 later
+    xyz: Point3f32;
     opacity: number; // f16
     cov: [number, number, number, number, number, number]; // [f16; 6]
-}
-
-export function createDefaultGaussian(): Gaussian {
-    return {
-        xyz: { x: 0, y: 0, z: 0 },
-        opacity: 0,
-        cov: [0, 0, 0, 0, 0, 0]
-    };
-}
-
-/**
- * 3D Covariance matrix (upper triangular)
- * #[repr(C)] equivalent
- */
-export interface Covariance3D {
-    data: [number, number, number, number, number, number]; // [f16; 6]
-}
-
-export function createDefaultCovariance3D(): Covariance3D {
-    return {
-        data: [0, 0, 0, 0, 0, 0]
-    };
-}
-
-/**
- * 2D Splat for rendering
- * #[repr(C)] equivalent
- */
-export interface Splat {
-    v: Vector4f16;
-    pos: Vector2f16;
-    color: Vector4f16;
-}
-
-/**
- * Quantization parameters
- * #[repr(C)] equivalent
- */
-export interface Quantization {
-    zeroPoint: number; // i32
-    scale: number; // f32
-    _pad: [number, number]; // [u32; 2] for alignment
-}
-
-export function createDefaultQuantization(): Quantization {
-    return {
-        zeroPoint: 0,
-        scale: 1.0,
-        _pad: [0, 0]
-    };
-}
-
-export function createQuantization(zeroPoint: number, scale: number): Quantization {
-    return {
-        zeroPoint,
-        scale,
-        _pad: [0, 0]
-    };
-}
-
-/**
- * Gaussian quantization parameters
- * #[repr(C)] equivalent
- */
-export interface GaussianQuantization {
-    colorDc: Quantization;
-    colorRest: Quantization;
+  };
+  
+  export type GaussianCompressed = {
+    // Rust: #[repr(C)] tightly packed; we mirror fields
+    xyz: Point3f32;              // f16
+    opacity: number;             // i8
+    scale_factor: number;        // i8
+    geometry_idx: number;        // u32
+    sh_idx: number;              // u32
+  };
+  
+  export type Covariance3D = {
+    // Rust: tuple struct Covariance3D([f16; 6]); keep the 6-tuple
+    v: [number, number, number, number, number, number];
+  };
+  
+  export class Quantization {
+    // Rust: #[repr(C)] { zero_point: i32, scale: f32, _pad: [u32; 2] }
+    zero_point: number;
+    scale: number;
+    _pad: [number, number];
+    constructor(zero_point = 0, scale = 1) {
+      this.zero_point = zero_point;
+      this.scale = scale;
+      this._pad = [0, 0];
+    }
+    static new(zero_point: number, scale: number) {
+      return new Quantization(zero_point, scale);
+    }
+  }
+  
+  export class GaussianQuantization {
+    color_dc: Quantization;
+    color_rest: Quantization;
     opacity: Quantization;
-    scalingFactor: Quantization;
-}
-
-export function createDefaultGaussianQuantization(): GaussianQuantization {
-    return {
-        colorDc: createDefaultQuantization(),
-        colorRest: createDefaultQuantization(),
-        opacity: createDefaultQuantization(),
-        scalingFactor: createDefaultQuantization()
-    };
-}
-
-/**
- * Axis-Aligned Bounding Box
- */
-export interface Aabb<T extends number = number> {
-    min: Point3f32;
-    max: Point3f32;
-}
-
-export function createAabb(min: Point3f32, max: Point3f32): Aabb {
-    return { min, max };
-}
-
-export function createUnitAabb(): Aabb {
-    return {
-        min: { x: -1, y: -1, z: -1 },
-        max: { x: 1, y: 1, z: 1 }
-    };
-}
-
-export function growAabb(aabb: Aabb, pos: Point3f32): void {
-    aabb.min.x = Math.min(aabb.min.x, pos.x);
-    aabb.min.y = Math.min(aabb.min.y, pos.y);
-    aabb.min.z = Math.min(aabb.min.z, pos.z);
-
-    aabb.max.x = Math.max(aabb.max.x, pos.x);
-    aabb.max.y = Math.max(aabb.max.y, pos.y);
-    aabb.max.z = Math.max(aabb.max.z, pos.z);
-}
-
-export function getAabbCorners(aabb: Aabb): Point3f32[] {
-    const corners: Point3f32[] = [
-        { x: 0, y: 0, z: 0 },
-        { x: 1, y: 0, z: 0 },
-        { x: 0, y: 1, z: 0 },
-        { x: 1, y: 1, z: 0 },
-        { x: 0, y: 0, z: 1 },
-        { x: 1, y: 0, z: 1 },
-        { x: 0, y: 1, z: 1 },
-        { x: 1, y: 1, z: 1 }
-    ];
-
-    const size = getAabbSize(aabb);
-    return corners.map(d => ({
-        x: aabb.min.x + size.x * d.x,
-        y: aabb.min.y + size.y * d.y,
-        z: aabb.min.z + size.z * d.z
-    }));
-}
-
-export function getAabbCenter(aabb: Aabb): Point3f32 {
-    return {
-        x: (aabb.min.x + aabb.max.x) / 2,
-        y: (aabb.min.y + aabb.max.y) / 2,
-        z: (aabb.min.z + aabb.max.z) / 2
-    };
-}
-
-export function getAabbRadius(aabb: Aabb): number {
-    const dx = aabb.max.x - aabb.min.x;
-    const dy = aabb.max.y - aabb.min.y;
-    const dz = aabb.max.z - aabb.min.z;
-    return Math.sqrt(dx * dx + dy * dy + dz * dz) / 2;
-}
-
-export function getAabbSize(aabb: Aabb): Vector3f32 {
-    return {
-        x: aabb.max.x - aabb.min.x,
-        y: aabb.max.y - aabb.min.y,
-        z: aabb.max.z - aabb.min.z
-    };
-}
-
-export function growAabbUnion(aabb: Aabb, other: Aabb): void {
-    aabb.min.x = Math.min(aabb.min.x, other.min.x);
-    aabb.min.y = Math.min(aabb.min.y, other.min.y);
-    aabb.min.z = Math.min(aabb.min.z, other.min.z);
-
-    aabb.max.x = Math.max(aabb.max.x, other.max.x);
-    aabb.max.y = Math.max(aabb.max.y, other.max.y);
-    aabb.max.z = Math.max(aabb.max.z, other.max.z);
-}
-
-// Forward declaration for GenericGaussianPointCloud (will be defined in io/mod.ts)
-export interface GenericGaussianPointCloud {
-    gaussians: Uint8Array;
-    shCoefs: Uint8Array;
-    compressed: boolean;
-    covars?: Covariance3D[];
-    quantization?: GaussianQuantization;
-    shDeg: number;
-    numPoints: number;
-    kernelSize?: number;
-    mipSplatting?: boolean;
-    backgroundColor?: [number, number, number];
-    up?: Vector3f32;
-    center: Point3f32;
-    aabb: Aabb;
-    
-    // Methods that will be implemented in GenericGaussianPointCloud
-    gaussianBuffer(): Uint8Array;
-    shCoefsBuffer(): Uint8Array;
-    isCompressed(): boolean;
-}
-
-/**
- * Main PointCloud class for GPU rendering
- */
-export class PointCloud {
-    private splat2dBuffer: GPUBuffer;
-    private bindGroup: GPUBindGroup;
-    private renderBindGroup: GPUBindGroup;
-    private numPointsValue: number;
-    private shDegValue: number;
-    private bboxValue: Aabb;
-    private compressedValue: boolean;
-    private centerValue: Point3f32;
-    private upValue?: Vector3f32;
-    private mipSplattingValue?: boolean;
-    private kernelSizeValue?: number;
-    private backgroundColorValue?: GPUColor;
-
+    scaling_factor: Quantization;
     constructor(
-        device: GPUDevice,
-        pc: GenericGaussianPointCloud
+      color_dc = new Quantization(),
+      color_rest = new Quantization(),
+      opacity = new Quantization(),
+      scaling_factor = new Quantization()
     ) {
-        // Create 2D splat buffer
-        this.splat2dBuffer = device.createBuffer({
-            label: "2d gaussians buffer",
-            size: pc.numPoints * this.getSplatSize(),
-            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE,
-            mappedAtCreation: false
+      this.color_dc = color_dc;
+      this.color_rest = color_rest;
+      this.opacity = opacity;
+      this.scaling_factor = scaling_factor;
+    }
+  }
+
+export class Aabb {
+  min: Vec3;
+  max: Vec3;
+
+  constructor(min: Vec3, max: Vec3) {
+    this.min = { ...min };
+    this.max = { ...max };
+  }
+
+  static unit(): Aabb {
+    return new Aabb({ x: -1, y: -1, z: -1 }, { x: 1, y: 1, z: 1 });
+  }
+
+  static zeroed(): Aabb {
+    return new Aabb({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 });
+  }
+
+  center(): Vec3 {
+    return {
+      x: (this.min.x + this.max.x) * 0.5,
+      y: (this.min.y + this.max.y) * 0.5,
+      z: (this.min.z + this.max.z) * 0.5,
+    };
+  }
+
+  radius(): number {
+    const dx = this.max.x - this.min.x;
+    const dy = this.max.y - this.min.y;
+    const dz = this.max.z - this.min.z;
+    return Math.sqrt(dx * dx + dy * dy + dz * dz) * 0.5;
+  }
+
+  size(): Vec3 {
+    return {
+      x: this.max.x - this.min.x,
+      y: this.max.y - this.min.y,
+      z: this.max.z - this.min.z,
+    };
+  }
+
+  grow(pos: Vec3): void {
+    this.min.x = Math.min(this.min.x, pos.x);
+    this.min.y = Math.min(this.min.y, pos.y);
+    this.min.z = Math.min(this.min.z, pos.z);
+    this.max.x = Math.max(this.max.x, pos.x);
+    this.max.y = Math.max(this.max.y, pos.y);
+    this.max.z = Math.max(this.max.z, pos.z);
+  }
+
+  grow_union(other: Aabb): void {
+    this.min.x = Math.min(this.min.x, other.min.x);
+    this.min.y = Math.min(this.min.y, other.min.y);
+    this.min.z = Math.min(this.min.z, other.min.z);
+    this.max.x = Math.max(this.max.x, other.max.x);
+    this.max.y = Math.max(this.max.y, other.max.y);
+    this.max.z = Math.max(this.max.z, other.max.z);
+  }
+}
+
+// Layout-compatible with WGSL struct Splat (5 x u32 = 20 bytes).
+export const BYTES_PER_SPLAT = 20;
+
+// ---- Minimal interface your loader should satisfy (mirrors GenericGaussianPointCloud) ----
+export interface GenericGaussianPointCloud {
+  num_points: number;
+  sh_deg: number;
+  compressed(): boolean;
+
+  // raw GPU-ready bytes:
+  gaussian_buffer(): ArrayBuffer;   // 3D gaussian source buffer (layout matches WGSL preprocess)
+  sh_coefs_buffer(): ArrayBuffer;   // SH buffer
+
+  // only for compressed:
+  covars?: ArrayBuffer;             // covariance blocks
+  quantization?: ArrayBufferView;   // bytes for GaussianQuantization uniform
+
+  aabb: { min: Vec3; max: Vec3 };
+  center: Vec3;
+  up?: Vec3;
+  mip_splatting?: boolean;
+  kernel_size?: number;
+  background_color?: Color3;
+}
+
+// ---- PointCloud (1:1 with Rust) ----
+export class PointCloud {
+    private splat_2d_buffer: GPUBuffer;
+  
+    // renamed private fields (leading underscore) to avoid clashing with methods
+    private _bind_group: GPUBindGroup;
+    private _render_bind_group: GPUBindGroup;
+    private num_points: number;
+    private sh_deg: number;
+    private bbox_: Aabb;
+    private compressed_: boolean;
+  
+    private center_: Vec3;
+    private up_?: Vec3;
+  
+    private mip_splatting_?: boolean;
+    private kernel_size_?: number;
+    private background_color_?: GPUColor;
+  
+    private vertex_buffer!: GPUBuffer; // 3D gaussians
+    private sh_buffer!: GPUBuffer;     // SH coefs
+    private covars_buffer?: GPUBuffer; // compressed only
+    private quantization_uniform?: UniformBuffer<ArrayBufferView>;
+  
+    // ---- new(device, pc) ----
+    static new(device: GPUDevice, pc: GenericGaussianPointCloud): PointCloud {
+      return new PointCloud(device, pc);
+    }
+  
+    private constructor(device: GPUDevice, pc: GenericGaussianPointCloud) {
+      // 2D splats buffer (written by preprocess, read by vertex shader)
+      this.splat_2d_buffer = device.createBuffer({
+        label: '2d gaussians buffer',
+        size: pc.num_points * BYTES_PER_SPLAT,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE
+      });
+  
+      // Render bind group (only points_2d at binding=2)
+      this._render_bind_group = device.createBindGroup({
+        label: 'point cloud rendering bind group',
+        layout: PointCloud.bind_group_layout_render(device),
+        entries: [
+          {
+            binding: 2,
+            resource: { buffer: this.splat_2d_buffer }
+          }
+        ]
+      });
+  
+      // 3D gaussians + SH buffers
+      this.vertex_buffer = device.createBuffer({
+        label: '3d gaussians buffer',
+        size: pc.gaussian_buffer().byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Uint8Array(this.vertex_buffer.getMappedRange()).set(new Uint8Array(pc.gaussian_buffer()));
+      this.vertex_buffer.unmap();
+  
+      this.sh_buffer = device.createBuffer({
+        label: 'sh coefs buffer',
+        size: pc.sh_coefs_buffer().byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Uint8Array(this.sh_buffer.getMappedRange()).set(new Uint8Array(pc.sh_coefs_buffer()));
+      this.sh_buffer.unmap();
+  
+      // Build the preprocess bind group (compressed or not)
+      const entries: GPUBindGroupEntry[] = [
+        { binding: 0, resource: { buffer: this.vertex_buffer } }, // read-only
+        { binding: 1, resource: { buffer: this.sh_buffer } },     // read-only
+        { binding: 2, resource: { buffer: this.splat_2d_buffer } } // read-write
+      ];
+  
+      if (pc.compressed()) {
+        // binding 3: covariances (storage read-only)
+        if (!pc.covars) throw new Error('compressed() true but covars missing');
+        this.covars_buffer = device.createBuffer({
+          label: 'Covariances buffer',
+          size: (pc.covars as any).byteLength ?? (pc.covars as ArrayBuffer).byteLength,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          mappedAtCreation: true
         });
-
-        // Create render bind group
-        this.renderBindGroup = device.createBindGroup({
-            label: "point cloud rendering bind group",
-            layout: PointCloud.bindGroupLayoutRender(device),
-            entries: [{
-                binding: 2,
-                resource: {
-                    buffer: this.splat2dBuffer
-                }
-            }]
+        new Uint8Array(this.covars_buffer.getMappedRange()).set(
+          pc.covars instanceof ArrayBuffer ? new Uint8Array(pc.covars) : new Uint8Array(pc.covars as ArrayBufferLike)
+        );
+        this.covars_buffer.unmap();
+        entries.push({ binding: 3, resource: { buffer: this.covars_buffer } });
+  
+        // binding 4: quantization uniform
+        if (!pc.quantization) throw new Error('compressed() true but quantization missing');
+        this.quantization_uniform = UniformBuffer.new(device, pc.quantization, 'quantization uniform buffer');
+        entries.push({ binding: 4, resource: { buffer: this.quantization_uniform.bufferRef() } });
+  
+        this._bind_group = device.createBindGroup({
+          label: 'point cloud bind group (compressed)',
+          layout: PointCloud.bind_group_layout_compressed(device),
+          entries
         });
-
-        // Create vertex buffer (3D gaussians)
-        const vertexBuffer = device.createBuffer({
-            label: "3d gaussians buffer",
-            size: pc.gaussianBuffer().byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            mappedAtCreation: true
+      } else {
+        this._bind_group = device.createBindGroup({
+          label: 'point cloud bind group',
+          layout: PointCloud.bind_group_layout(device),
+          entries
         });
-        new Uint8Array(vertexBuffer.getMappedRange()).set(pc.gaussianBuffer());
-        vertexBuffer.unmap();
+      }
+  
+      // mirror Rust fields
+      this.num_points = pc.num_points >>> 0;
+      this.sh_deg = pc.sh_deg >>> 0;
+      this.compressed_ = pc.compressed();
+      this.bbox_ = new Aabb(pc.aabb.min, pc.aabb.max);
+      this.center_ = { ...pc.center };
+      this.up_ = pc.up ? { ...pc.up } : undefined;
+      this.mip_splatting_ = pc.mip_splatting;
+      this.kernel_size_ = pc.kernel_size;
+      this.background_color_ = pc.background_color
+        ? { r: pc.background_color[0], g: pc.background_color[1], b: pc.background_color[2], a: 1.0 }
+        : undefined;
+    }
+  
+    // ---- getters matching Rust API ----
+    compressed(): boolean { return this.compressed_; }
+    numPoints(): number { return this.num_points; }
+    shDeg(): number { return this.sh_deg; }
+    bbox(): Aabb { return this.bbox_; }
+  
+    // Rust names (methods) — keep names; return the underscored fields
+    bind_group(): GPUBindGroup { return this._bind_group; }
+    render_bind_group(): GPUBindGroup { return this._render_bind_group; }
+  
+    // TS-friendly aliases used by your renderer.ts:
+    getBindGroup(): GPUBindGroup { return this._bind_group; }
+    getRenderBindGroup(): GPUBindGroup { return this._render_bind_group; }
+  
+    mipSplatting(): boolean | undefined { return this.mip_splatting_; }
+    dilationKernelSize(): number | undefined { return this.kernel_size_; }
+    center(): Vec3 { return this.center_; }
+    up(): Vec3 | undefined { return this.up_; }
 
-        // Create SH coefficients buffer
-        const shBuffer = device.createBuffer({
-            label: "sh coefs buffer",
-            size: pc.shCoefsBuffer().byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            mappedAtCreation: true
-        });
-        new Uint8Array(shBuffer.getMappedRange()).set(pc.shCoefsBuffer());
-        shBuffer.unmap();
-
-        // Base bind group entries
-        const bindGroupEntries: GPUBindGroupEntry[] = [
-            {
-                binding: 0,
-                resource: { buffer: vertexBuffer }
-            },
-            {
-                binding: 1,
-                resource: { buffer: shBuffer }
-            },
-            {
-                binding: 2,
-                resource: { buffer: this.splat2dBuffer }
-            }
-        ];
-
-        // Create bind group based on compression
-        if (pc.isCompressed()) {
-            // Add covariance buffer
-            const covarsBuffer = device.createBuffer({
-                label: "Covariances buffer",
-                size: (pc.covars?.length || 0) * 6 * 2, // 6 f16 values
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-                mappedAtCreation: true
-            });
-            if (pc.covars) {
-                const covarsData = new Uint8Array(covarsBuffer.getMappedRange());
-                // Convert covariance data to bytes (simplified)
-                let offset = 0;
-                for (const covar of pc.covars) {
-                    for (const value of covar.data) {
-                        // Convert f16 to bytes (simplified - in practice need proper f16 conversion)
-                        const view = new DataView(covarsData.buffer, offset, 2);
-                        view.setUint16(0, Math.floor(value * 1000), true); // Simplified f16 conversion
-                        offset += 2;
-                    }
-                }
-            }
-            covarsBuffer.unmap();
-
-            // Add quantization uniform buffer
-            const quantizationUniform = UniformBuffer.new(
-                device,
-                pc.quantization || createDefaultGaussianQuantization(),
-                "quantization uniform buffer"
-            );
-
-            bindGroupEntries.push(
-                {
-                    binding: 3,
-                    resource: { buffer: covarsBuffer }
-                },
-                {
-                    binding: 4,
-                    resource: { buffer: quantizationUniform.getBuffer() }
-                }
-            );
-
-            this.bindGroup = device.createBindGroup({
-                label: "point cloud bind group (compressed)",
-                layout: PointCloud.bindGroupLayoutCompressed(device),
-                entries: bindGroupEntries
-            });
-        } else {
-            this.bindGroup = device.createBindGroup({
-                label: "point cloud bind group",
-                layout: PointCloud.bindGroupLayout(device),
-                entries: bindGroupEntries
-            });
+  // ---- static bind group layouts (exact bindings/visibility as Rust) ----
+  static bind_group_layout_compressed(device: GPUDevice): GPUBindGroupLayout {
+    return device.createBindGroupLayout({
+      label: 'point cloud bind group layout (compressed)',
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage', hasDynamicOffset: false }
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage', hasDynamicOffset: false }
+        },
+        {
+          binding: 2,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'storage', hasDynamicOffset: false }
+        },
+        {
+          binding: 3,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage', hasDynamicOffset: false }
+        },
+        {
+          binding: 4,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'uniform', hasDynamicOffset: false }
         }
+      ]
+    });
+  }
 
-        // Set properties
-        this.numPointsValue = pc.numPoints;
-        this.shDegValue = pc.shDeg;
-        this.compressedValue = pc.isCompressed();
-        this.bboxValue = pc.aabb;
-        this.centerValue = pc.center;
-        this.upValue = pc.up;
-        this.mipSplattingValue = pc.mipSplatting;
-        this.kernelSizeValue = pc.kernelSize;
-        this.backgroundColorValue = pc.backgroundColor ? {
-            r: pc.backgroundColor[0],
-            g: pc.backgroundColor[1],
-            b: pc.backgroundColor[2],
-            a: 1.0
-        } : undefined;
-    }
+  static bind_group_layout(device: GPUDevice): GPUBindGroupLayout {
+    return device.createBindGroupLayout({
+      label: 'point cloud float bind group layout',
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage', hasDynamicOffset: false }
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage', hasDynamicOffset: false }
+        },
+        {
+          binding: 2,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'storage', hasDynamicOffset: false }
+        }
+      ]
+    });
+  }
 
-    compressed(): boolean {
-        return this.compressedValue;
-    }
-
-    numPoints(): number {
-        return this.numPointsValue;
-    }
-
-    bbox(): Aabb {
-        return this.bboxValue;
-    }
-
-    getBindGroup(): GPUBindGroup {
-        return this.bindGroup;
-    }
-
-    getRenderBindGroup(): GPUBindGroup {
-        return this.renderBindGroup;
-    }
-
-    mipSplatting(): boolean | undefined {
-        return this.mipSplattingValue;
-    }
-
-    dilationKernelSize(): number | undefined {
-        return this.kernelSizeValue;
-    }
-
-    center(): Point3f32 {
-        return this.centerValue;
-    }
-
-    up(): Vector3f32 | undefined {
-        return this.upValue;
-    }
-
-    private getSplatSize(): number {
-        // Size of Splat struct: Vector4f16 + Vector2f16 + Vector4f16
-        // Each f16 is 2 bytes: (4 + 2 + 4) * 2 = 20 bytes
-        return 20;
-    }
-
-    static bindGroupLayoutCompressed(device: GPUDevice): GPUBindGroupLayout {
-        return device.createBindGroupLayout({
-            label: "point cloud bind group layout (compressed)",
-            entries: [
-                {
-                    binding: 0,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
-                },
-                {
-                    binding: 1,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
-                },
-                {
-                    binding: 2,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "storage"
-                    }
-                },
-                {
-                    binding: 3,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
-                },
-                {
-                    binding: 4,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "uniform"
-                    }
-                }
-            ]
-        });
-    }
-
-    static bindGroupLayout(device: GPUDevice): GPUBindGroupLayout {
-        return device.createBindGroupLayout({
-            label: "point cloud float bind group layout",
-            entries: [
-                {
-                    binding: 0,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
-                },
-                {
-                    binding: 1,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
-                },
-                {
-                    binding: 2,
-                    visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "storage"
-                    }
-                }
-            ]
-        });
-    }
-
-    static bindGroupLayoutRender(device: GPUDevice): GPUBindGroupLayout {
-        return device.createBindGroupLayout({
-            label: "point cloud rendering bind group layout",
-            entries: [{
-                binding: 2,
-                visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
-                buffer: {
-                    type: "read-only-storage"
-                }
-            }]
-        });
-    }
+  static bind_group_layout_render(device: GPUDevice): GPUBindGroupLayout {
+    return device.createBindGroupLayout({
+      label: 'point cloud rendering bind group layout',
+      entries: [
+        {
+          binding: 2,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage', hasDynamicOffset: false }
+        }
+      ]
+    });
+  }
 }

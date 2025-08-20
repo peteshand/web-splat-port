@@ -1,155 +1,112 @@
-/**
- * TypeScript port of pointcloud.rs
- * Point cloud data structures and GPU buffer management
- */
-export interface Point3f16 {
+export type Vec3 = {
     x: number;
     y: number;
     z: number;
-}
-export interface Point3f32 {
+};
+export type Color3 = [number, number, number];
+export type Point3f32 = {
     x: number;
     y: number;
     z: number;
-}
-export interface Vector3f32 {
+};
+export type Vector3f32 = {
     x: number;
     y: number;
     z: number;
-}
-export interface Vector2f16 {
-    x: number;
-    y: number;
-}
-export interface Vector4f16 {
-    x: number;
-    y: number;
-    z: number;
-    w: number;
-}
-/**
- * Compressed Gaussian representation
- * #[repr(C)] equivalent
- */
-export interface GaussianCompressed {
-    xyz: Point3f16;
-    opacity: number;
-    scaleFactor: number;
-    geometryIdx: number;
-    shIdx: number;
-}
-export declare function createDefaultGaussianCompressed(): GaussianCompressed;
-/**
- * Uncompressed Gaussian representation
- * #[repr(C)] equivalent
- */
-export interface Gaussian {
-    xyz: Point3f16;
+};
+export type Gaussian = {
+    xyz: Point3f32;
     opacity: number;
     cov: [number, number, number, number, number, number];
-}
-export declare function createDefaultGaussian(): Gaussian;
-/**
- * 3D Covariance matrix (upper triangular)
- * #[repr(C)] equivalent
- */
-export interface Covariance3D {
-    data: [number, number, number, number, number, number];
-}
-export declare function createDefaultCovariance3D(): Covariance3D;
-/**
- * 2D Splat for rendering
- * #[repr(C)] equivalent
- */
-export interface Splat {
-    v: Vector4f16;
-    pos: Vector2f16;
-    color: Vector4f16;
-}
-/**
- * Quantization parameters
- * #[repr(C)] equivalent
- */
-export interface Quantization {
-    zeroPoint: number;
+};
+export type GaussianCompressed = {
+    xyz: Point3f32;
+    opacity: number;
+    scale_factor: number;
+    geometry_idx: number;
+    sh_idx: number;
+};
+export type Covariance3D = {
+    v: [number, number, number, number, number, number];
+};
+export declare class Quantization {
+    zero_point: number;
     scale: number;
     _pad: [number, number];
+    constructor(zero_point?: number, scale?: number);
+    static new(zero_point: number, scale: number): Quantization;
 }
-export declare function createDefaultQuantization(): Quantization;
-export declare function createQuantization(zeroPoint: number, scale: number): Quantization;
-/**
- * Gaussian quantization parameters
- * #[repr(C)] equivalent
- */
-export interface GaussianQuantization {
-    colorDc: Quantization;
-    colorRest: Quantization;
+export declare class GaussianQuantization {
+    color_dc: Quantization;
+    color_rest: Quantization;
     opacity: Quantization;
-    scalingFactor: Quantization;
+    scaling_factor: Quantization;
+    constructor(color_dc?: Quantization, color_rest?: Quantization, opacity?: Quantization, scaling_factor?: Quantization);
 }
-export declare function createDefaultGaussianQuantization(): GaussianQuantization;
-/**
- * Axis-Aligned Bounding Box
- */
-export interface Aabb<T extends number = number> {
-    min: Point3f32;
-    max: Point3f32;
+export declare class Aabb {
+    min: Vec3;
+    max: Vec3;
+    constructor(min: Vec3, max: Vec3);
+    static unit(): Aabb;
+    static zeroed(): Aabb;
+    center(): Vec3;
+    radius(): number;
+    size(): Vec3;
+    grow(pos: Vec3): void;
+    grow_union(other: Aabb): void;
 }
-export declare function createAabb(min: Point3f32, max: Point3f32): Aabb;
-export declare function createUnitAabb(): Aabb;
-export declare function growAabb(aabb: Aabb, pos: Point3f32): void;
-export declare function getAabbCorners(aabb: Aabb): Point3f32[];
-export declare function getAabbCenter(aabb: Aabb): Point3f32;
-export declare function getAabbRadius(aabb: Aabb): number;
-export declare function getAabbSize(aabb: Aabb): Vector3f32;
-export declare function growAabbUnion(aabb: Aabb, other: Aabb): void;
+export declare const BYTES_PER_SPLAT = 20;
 export interface GenericGaussianPointCloud {
-    gaussians: Uint8Array;
-    shCoefs: Uint8Array;
-    compressed: boolean;
-    covars?: Covariance3D[];
-    quantization?: GaussianQuantization;
-    shDeg: number;
-    numPoints: number;
-    kernelSize?: number;
-    mipSplatting?: boolean;
-    backgroundColor?: [number, number, number];
-    up?: Vector3f32;
-    center: Point3f32;
-    aabb: Aabb;
-    gaussianBuffer(): Uint8Array;
-    shCoefsBuffer(): Uint8Array;
-    isCompressed(): boolean;
+    num_points: number;
+    sh_deg: number;
+    compressed(): boolean;
+    gaussian_buffer(): ArrayBuffer;
+    sh_coefs_buffer(): ArrayBuffer;
+    covars?: ArrayBuffer;
+    quantization?: ArrayBufferView;
+    aabb: {
+        min: Vec3;
+        max: Vec3;
+    };
+    center: Vec3;
+    up?: Vec3;
+    mip_splatting?: boolean;
+    kernel_size?: number;
+    background_color?: Color3;
 }
-/**
- * Main PointCloud class for GPU rendering
- */
 export declare class PointCloud {
-    private splat2dBuffer;
-    private bindGroup;
-    private renderBindGroup;
-    private numPointsValue;
-    private shDegValue;
-    private bboxValue;
-    private compressedValue;
-    private centerValue;
-    private upValue?;
-    private mipSplattingValue?;
-    private kernelSizeValue?;
-    private backgroundColorValue?;
-    constructor(device: GPUDevice, pc: GenericGaussianPointCloud);
+    private splat_2d_buffer;
+    private _bind_group;
+    private _render_bind_group;
+    private num_points;
+    private sh_deg;
+    private bbox_;
+    private compressed_;
+    private center_;
+    private up_?;
+    private mip_splatting_?;
+    private kernel_size_?;
+    private background_color_?;
+    private vertex_buffer;
+    private sh_buffer;
+    private covars_buffer?;
+    private quantization_uniform?;
+    static new(device: GPUDevice, pc: GenericGaussianPointCloud): PointCloud;
+    private constructor();
     compressed(): boolean;
     numPoints(): number;
+    shDeg(): number;
     bbox(): Aabb;
+    bind_group(): GPUBindGroup;
+    render_bind_group(): GPUBindGroup;
     getBindGroup(): GPUBindGroup;
     getRenderBindGroup(): GPUBindGroup;
     mipSplatting(): boolean | undefined;
     dilationKernelSize(): number | undefined;
-    center(): Point3f32;
-    up(): Vector3f32 | undefined;
-    private getSplatSize;
-    static bindGroupLayoutCompressed(device: GPUDevice): GPUBindGroupLayout;
-    static bindGroupLayout(device: GPUDevice): GPUBindGroupLayout;
-    static bindGroupLayoutRender(device: GPUDevice): GPUBindGroupLayout;
+    center(): Vec3;
+    up(): Vec3 | undefined;
+    static bind_group_layout_compressed(device: GPUDevice): GPUBindGroupLayout;
+    static bind_group_layout(device: GPUDevice): GPUBindGroupLayout;
+    static bind_group_layout_render(device: GPUDevice): GPUBindGroupLayout;
 }
 //# sourceMappingURL=pointcloud.d.ts.map

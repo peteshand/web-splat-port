@@ -1,0 +1,1 @@
+{"root":["./src/animation.ts","./src/camera.ts","./src/controller.ts","./src/gpu_rs.ts","./src/lib.ts","./src/pointcloud.ts","./src/renderer.ts","./src/scene.ts","./src/uniform.ts","./src/utils.ts","./src/io/mod.ts","./src/io/npz.ts","./src/io/ply.ts"],"errors":true,"version":"5.9.2"}

@@ -1,214 +1,239 @@
-/**
- * TypeScript port of io/mod.rs
- * Point cloud I/O system for loading Gaussian splat data
- */
-import { createUnitAabb, growAabb, getAabbRadius } from '../pointcloud.js';
+// io/mod.ts
+// 1:1 port of src/io/mod.rs (with TS-friendly types)
+import { Aabb, } from '../pointcloud.js';
 import { PlyReader } from './ply.js';
-import { NpzReader } from './npz.js';
-/**
- * Generic Gaussian point cloud data structure
- */
 export class GenericGaussianPointCloud {
-    gaussians;
-    shCoefs;
-    compressed;
+    gaussiansBytes;
+    shCoefsBytes;
+    _compressed;
     covars;
     quantization;
-    shDeg;
-    numPoints;
-    kernelSize;
-    mipSplatting;
-    backgroundColor;
+    sh_deg;
+    num_points;
+    kernel_size;
+    mip_splatting;
+    background_color;
     up;
     center;
     aabb;
-    constructor(gaussians, shCoefs, compressed, shDeg, numPoints, center, aabb, options = {}) {
-        this.gaussians = gaussians;
-        this.shCoefs = shCoefs;
-        this.compressed = compressed;
-        this.shDeg = shDeg;
-        this.numPoints = numPoints;
-        this.center = center;
-        this.aabb = aabb;
-        this.covars = options.covars;
-        this.quantization = options.quantization;
-        this.kernelSize = options.kernelSize;
-        this.mipSplatting = options.mipSplatting;
-        this.backgroundColor = options.backgroundColor;
-        this.up = options.up;
-    }
-    /**
-     * Load point cloud from file data
-     */
-    static async load(fileData) {
-        const signature = new Uint8Array(fileData.slice(0, 4));
-        // Check for PLY format
-        const plyMagic = new TextEncoder().encode('ply\n');
-        if (this.arrayStartsWith(signature, plyMagic.slice(0, 3))) {
-            const plyReader = new PlyReader(fileData);
-            return plyReader.read();
+    _gaussiansParsed = null;
+    static load(data) {
+        const sig = new Uint8Array(data, 0, 4);
+        if (startsWith(sig, PlyReader.magic_bytes())) {
+            const ply = new PlyReader(data);
+            return ply.read();
         }
-        // Check for NPZ format
-        const npzMagic = new Uint8Array([0x50, 0x4B]); // PK (ZIP signature)
-        if (this.arrayStartsWith(signature, npzMagic)) {
-            const npzReader = new NpzReader(fileData);
-            return npzReader.read();
-        }
+        // if (startsWith(sig, NpzReader.magic_bytes())) {
+        //   const npz = new NpzReader(data);
+        //   return npz.read();
+        // }
         throw new Error('Unknown file format');
     }
-    static arrayStartsWith(array, prefix) {
-        if (array.length < prefix.length)
-            return false;
-        for (let i = 0; i < prefix.length; i++) {
-            if (array[i] !== prefix[i])
-                return false;
+    // Rust: fn new(gaussians: Vec<Gaussian>, sh_coefs: Vec<[[f16;3];16]>, ...)
+    static new(gaussians, sh_coefs, sh_deg, num_points, kernel_size, mip_splatting, background_color, covars, quantization) {
+        let bbox = Aabb.zeroed();
+        for (const g of gaussians) {
+            bbox.grow({ x: g.xyz.x, y: g.xyz.y, z: g.xyz.z });
         }
-        return true;
+        const points = gaussians.map((g) => ({
+            x: g.xyz.x, y: g.xyz.y, z: g.xyz.z,
+        }));
+        const [center, up0] = plane_from_points(points);
+        let up = up0;
+        if (bbox.radius() < 10.0)
+            up = null;
+        const gaussiansBytes = packGaussiansF16(gaussians);
+        const shCoefsBytes = packShCoefsF16(sh_coefs);
+        return new GenericGaussianPointCloud(gaussiansBytes, shCoefsBytes, sh_deg, num_points, kernel_size, mip_splatting, background_color, covars, quantization, up, center, bbox, 
+        /* compressed */ false, 
+        /* parsed */ gaussians);
     }
-    /**
-     * Create from uncompressed Gaussian data
-     */
-    static fromGaussians(gaussians, shCoefs, // [point][coef][rgb]
-    shDeg, options = {}) {
-        // Calculate bounding box
-        let aabb = createUnitAabb();
-        let first = true;
-        for (const gaussian of gaussians) {
-            const point = {
-                x: gaussian.xyz.x,
-                y: gaussian.xyz.y,
-                z: gaussian.xyz.z
-            };
-            if (first) {
-                aabb.min = { ...point };
-                aabb.max = { ...point };
-                first = false;
-            }
-            else {
-                growAabb(aabb, point);
-            }
+    // Rust: fn new_compressed(...)
+    static new_compressed(gaussians, sh_coefs_packed, sh_deg, num_points, kernel_size, mip_splatting, background_color, covars, quantization) {
+        let bbox = Aabb.unit();
+        for (const v of gaussians) {
+            bbox.grow({ x: v.xyz.x, y: v.xyz.y, z: v.xyz.z });
         }
-        // Calculate center and up vector from points
-        const points = gaussians.map(g => ({ x: g.xyz.x, y: g.xyz.y, z: g.xyz.z }));
-        const [center, up] = planeFromPoints(points);
-        // Convert to byte arrays (simplified - would need proper serialization)
-        const gaussianBytes = new Uint8Array(gaussians.length * 32); // Approximate size
-        const shCoefBytes = new Uint8Array(shCoefs.length * 16 * 3 * 2); // f16 * 3 colors * 16 coefs
-        return new GenericGaussianPointCloud(gaussianBytes, shCoefBytes, false, // not compressed
-        shDeg, gaussians.length, center, aabb, {
-            ...options,
-            up: getAabbRadius(aabb) >= 10 ? (up || undefined) : undefined
-        });
+        const points = gaussians.map((g) => ({
+            x: g.xyz.x, y: g.xyz.y, z: g.xyz.z,
+        }));
+        const [center, up0] = plane_from_points(points);
+        let up = up0;
+        if (bbox.radius() < 10.0)
+            up = null;
+        const gaussiansBytes = packGaussiansCompressed(gaussians);
+        return new GenericGaussianPointCloud(gaussiansBytes, sh_coefs_packed, sh_deg, num_points, kernel_size, mip_splatting, background_color, covars, quantization, up, center, bbox, 
+        /* compressed */ true, 
+        /* parsed */ null);
     }
-    /**
-     * Create from compressed Gaussian data
-     */
-    static fromCompressedGaussians(gaussians, shCoefs, shDeg, options = {}) {
-        // Calculate bounding box
-        let aabb = createUnitAabb();
-        let first = true;
-        for (const gaussian of gaussians) {
-            const point = {
-                x: gaussian.xyz.x,
-                y: gaussian.xyz.y,
-                z: gaussian.xyz.z
-            };
-            if (first) {
-                aabb.min = { ...point };
-                aabb.max = { ...point };
-                first = false;
-            }
-            else {
-                growAabb(aabb, point);
-            }
-        }
-        // Calculate center and up vector from points
-        const points = gaussians.map(g => ({ x: g.xyz.x, y: g.xyz.y, z: g.xyz.z }));
-        const [center, up] = planeFromPoints(points);
-        // Convert to byte arrays (simplified)
-        const gaussianBytes = new Uint8Array(gaussians.length * 20); // Approximate size for compressed
-        return new GenericGaussianPointCloud(gaussianBytes, shCoefs, true, // compressed
-        shDeg, gaussians.length, center, aabb, {
-            ...options,
-            up: getAabbRadius(aabb) >= 10 ? (up || undefined) : undefined
-        });
+    constructor(gaussiansBytes, shCoefsBytes, sh_deg, num_points, kernel_size, mip_splatting, background_color, covars, quantization, up, center, aabb, compressed, parsed) {
+        this.gaussiansBytes = gaussiansBytes;
+        this.shCoefsBytes = shCoefsBytes;
+        this._compressed = compressed;
+        this.covars = covars ?? null;
+        this.quantization = quantization ?? null;
+        this.sh_deg = sh_deg;
+        this.num_points = num_points;
+        this.kernel_size = kernel_size ?? null;
+        this.mip_splatting = mip_splatting ?? null;
+        this.background_color = background_color ?? null;
+        this.up = up;
+        this.center = center;
+        this.aabb = aabb;
+        this._gaussiansParsed = parsed;
     }
-    /**
-     * Get uncompressed Gaussians
-     */
-    getGaussians() {
-        if (this.compressed) {
+    gaussians() {
+        if (this._compressed) {
             throw new Error('Gaussians are compressed');
         }
-        // Would need proper deserialization
-        return [];
+        if (this._gaussiansParsed)
+            return this._gaussiansParsed;
+        throw new Error('Parsed gaussians not available');
     }
-    /**
-     * Get compressed Gaussians
-     */
-    getGaussiansCompressed() {
-        if (!this.compressed) {
-            throw new Error('Gaussians are not compressed');
+    // (kept aligned with the Rust provided logic signature-wise;
+    // the Rust version appears inconsistent; we mirror the surface API)
+    gaussians_compressed() {
+        if (this._compressed) {
+            throw new Error('Gaussians are compressed');
         }
-        // Would need proper deserialization
-        return [];
+        else {
+            // The Rust snippet returns a cast here; we surface an error like it would at runtime.
+            throw new Error('Not compressed');
+        }
     }
-    /**
-     * Get SH coefficients buffer
-     */
-    shCoefsBuffer() {
-        return this.shCoefs;
+    sh_coefs_buffer() {
+        return this.shCoefsBytes;
     }
-    /**
-     * Get Gaussian buffer
-     */
-    gaussianBuffer() {
-        return this.gaussians;
+    gaussian_buffer() {
+        return this.gaussiansBytes;
     }
-    /**
-     * Check if compressed
-     */
-    isCompressed() {
-        return this.compressed;
+    compressed() {
+        return this._compressed;
     }
 }
-/**
- * Fit a plane to a collection of points
- * Fast, and accurate to within a few degrees
- * Returns center point and normal vector (or null if points don't span a plane)
- * See http://www.ilikebigbits.com/2017_09_25_plane_from_points_2.html
- */
-function planeFromPoints(points) {
+/* ------------------------------- small helpers ------------------------------ */
+function startsWith(buf, sig) {
+    if (sig.length > buf.length)
+        return false;
+    for (let i = 0; i < sig.length; i++)
+        if (buf[i] !== sig[i])
+            return false;
+    return true;
+}
+// float32 -> float16 (uint16)
+function f32_to_f16(val) {
+    const f = new Float32Array(1);
+    const i = new Int32Array(f.buffer);
+    f[0] = val;
+    const x = i[0];
+    const sign = (x >> 16) & 0x8000;
+    let mant = x & 0x007fffff;
+    let exp = (x >> 23) & 0xff;
+    if (exp === 0xff)
+        return sign | (mant ? 0x7e00 : 0x7c00);
+    if (exp > 0x70)
+        return sign | 0x7c00;
+    if (exp < 0x71) {
+        const shift = 0x71 - exp;
+        if (shift > 24)
+            return sign;
+        mant = (mant | 0x00800000) >> shift;
+        if (mant & 0x00001000)
+            mant += 0x00002000;
+        return sign | (mant >> 13);
+    }
+    exp = exp - 0x70;
+    mant = mant + 0x00001000;
+    if (mant & 0x00800000) {
+        mant = 0;
+        exp += 1;
+    }
+    if (exp >= 0x1f)
+        return sign | 0x7c00;
+    return sign | (exp << 10) | (mant >> 13);
+}
+function writeF16(view, byteOffset, v) {
+    view.setUint16(byteOffset, f32_to_f16(v), true);
+}
+// Gaussian: 20 bytes each (3*f16 + f16 + 6*f16)
+function packGaussiansF16(gaussians) {
+    const BYTES_PER = 20;
+    const buf = new ArrayBuffer(gaussians.length * BYTES_PER);
+    const view = new DataView(buf);
+    let off = 0;
+    for (const g of gaussians) {
+        writeF16(view, off + 0, g.xyz.x);
+        writeF16(view, off + 2, g.xyz.y);
+        writeF16(view, off + 4, g.xyz.z);
+        writeF16(view, off + 6, g.opacity);
+        writeF16(view, off + 8, g.cov[0]);
+        writeF16(view, off + 10, g.cov[1]);
+        writeF16(view, off + 12, g.cov[2]);
+        writeF16(view, off + 14, g.cov[3]);
+        writeF16(view, off + 16, g.cov[4]);
+        writeF16(view, off + 18, g.cov[5]);
+        off += BYTES_PER;
+    }
+    return new Uint8Array(buf);
+}
+// sh_coefs: Vec<[[f16;3];16]> per point => 96 bytes per point
+function packShCoefsF16(sh) {
+    const BYTES_PER_POINT = 16 * 3 * 2; // 96
+    const buf = new ArrayBuffer(sh.length * BYTES_PER_POINT);
+    const view = new DataView(buf);
+    let off = 0;
+    for (const block of sh) {
+        for (let i = 0; i < 16; i++) {
+            const [r, g, b] = block[i];
+            writeF16(view, off + 0, r);
+            writeF16(view, off + 2, g);
+            writeF16(view, off + 4, b);
+            off += 6;
+        }
+    }
+    return new Uint8Array(buf);
+}
+// GaussianCompressed: 16 bytes each
+function packGaussiansCompressed(g) {
+    const BYTES_PER = 16;
+    const buf = new ArrayBuffer(g.length * BYTES_PER);
+    const view = new DataView(buf);
+    let off = 0;
+    for (const v of g) {
+        writeF16(view, off + 0, v.xyz.x);
+        writeF16(view, off + 2, v.xyz.y);
+        writeF16(view, off + 4, v.xyz.z);
+        view.setInt8(off + 6, v.opacity);
+        view.setInt8(off + 7, v.scale_factor);
+        view.setUint32(off + 8, v.geometry_idx, true);
+        view.setUint32(off + 12, v.sh_idx, true);
+        off += BYTES_PER;
+    }
+    return new Uint8Array(buf);
+}
+/* plane_from_points (unchanged) */
+function plane_from_points(points) {
     const n = points.length;
-    // Calculate centroid
-    let sum = { x: 0, y: 0, z: 0 };
+    let sumX = 0.0, sumY = 0.0, sumZ = 0.0;
     for (const p of points) {
-        sum.x += p.x;
-        sum.y += p.y;
-        sum.z += p.z;
+        sumX += p.x;
+        sumY += p.y;
+        sumZ += p.z;
     }
-    const centroid = {
-        x: sum.x / n,
-        y: sum.y / n,
-        z: sum.z / n
-    };
-    if (n < 3) {
+    const centroid = { x: sumX / (n || 1), y: sumY / (n || 1), z: sumZ / (n || 1) };
+    if (n < 3)
         return [centroid, null];
-    }
-    // Calculate full 3x3 covariance matrix, excluding symmetries
-    let xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+    let xx = 0.0, xy = 0.0, xz = 0.0, yy = 0.0, yz = 0.0, zz = 0.0;
     for (const p of points) {
-        const r = {
-            x: p.x - centroid.x,
-            y: p.y - centroid.y,
-            z: p.z - centroid.z
-        };
-        xx += r.x * r.x;
-        xy += r.x * r.y;
-        xz += r.x * r.z;
-        yy += r.y * r.y;
-        yz += r.y * r.z;
-        zz += r.z * r.z;
+        const rx = p.x - centroid.x;
+        const ry = p.y - centroid.y;
+        const rz = p.z - centroid.z;
+        xx += rx * rx;
+        xy += rx * ry;
+        xz += rx * rz;
+        yy += ry * ry;
+        yz += ry * rz;
+        zz += rz * rz;
     }
     xx /= n;
     xy /= n;
@@ -216,69 +241,46 @@ function planeFromPoints(points) {
     yy /= n;
     yz /= n;
     zz /= n;
-    let weightedDir = { x: 0, y: 0, z: 0 };
-    // X determinant
+    let wx = 0.0, wy = 0.0, wz = 0.0;
     {
-        const detX = yy * zz - yz * yz;
-        const axisDir = {
-            x: detX,
-            y: xz * yz - xy * zz,
-            z: xy * yz - xz * yy
-        };
-        let weight = detX * detX;
-        if (weightedDir.x * axisDir.x + weightedDir.y * axisDir.y + weightedDir.z * axisDir.z < 0) {
-            weight = -weight;
-        }
-        weightedDir.x += axisDir.x * weight;
-        weightedDir.y += axisDir.y * weight;
-        weightedDir.z += axisDir.z * weight;
+        const det_x = yy * zz - yz * yz;
+        const ax = det_x, ay = xz * yz - xy * zz, az = xy * yz - xz * yy;
+        let w = det_x * det_x;
+        if (wx * ax + wy * ay + wz * az < 0.0)
+            w = -w;
+        wx += ax * w;
+        wy += ay * w;
+        wz += az * w;
     }
-    // Y determinant
     {
-        const detY = xx * zz - xz * xz;
-        const axisDir = {
-            x: xz * yz - xy * zz,
-            y: detY,
-            z: xy * xz - yz * xx
-        };
-        let weight = detY * detY;
-        if (weightedDir.x * axisDir.x + weightedDir.y * axisDir.y + weightedDir.z * axisDir.z < 0) {
-            weight = -weight;
-        }
-        weightedDir.x += axisDir.x * weight;
-        weightedDir.y += axisDir.y * weight;
-        weightedDir.z += axisDir.z * weight;
+        const det_y = xx * zz - xz * xz;
+        const ax = xz * yz - xy * zz, ay = det_y, az = xy * xz - yz * xx;
+        let w = det_y * det_y;
+        if (wx * ax + wy * ay + wz * az < 0.0)
+            w = -w;
+        wx += ax * w;
+        wy += ay * w;
+        wz += az * w;
     }
-    // Z determinant
     {
-        const detZ = xx * yy - xy * xy;
-        const axisDir = {
-            x: xy * yz - xz * yy,
-            y: xy * xz - yz * xx,
-            z: detZ
-        };
-        let weight = detZ * detZ;
-        if (weightedDir.x * axisDir.x + weightedDir.y * axisDir.y + weightedDir.z * axisDir.z < 0) {
-            weight = -weight;
-        }
-        weightedDir.x += axisDir.x * weight;
-        weightedDir.y += axisDir.y * weight;
-        weightedDir.z += axisDir.z * weight;
+        const det_z = xx * yy - xy * xy;
+        const ax = xy * yz - xz * yy, ay = xy * xz - yz * xx, az = det_z;
+        let w = det_z * det_z;
+        if (wx * ax + wy * ay + wz * az < 0.0)
+            w = -w;
+        wx += ax * w;
+        wy += ay * w;
+        wz += az * w;
     }
-    // Normalize
-    const length = Math.sqrt(weightedDir.x * weightedDir.x + weightedDir.y * weightedDir.y + weightedDir.z * weightedDir.z);
-    if (length === 0 || !isFinite(length)) {
+    const len = Math.hypot(wx, wy, wz);
+    if (!(len > 0) || !Number.isFinite(len))
         return [centroid, null];
+    let nx = wx / len, ny = wy / len, nz = wz / len;
+    if (ny < 0.0) {
+        nx = -nx;
+        ny = -ny;
+        nz = -nz;
     }
-    let normal = {
-        x: weightedDir.x / length,
-        y: weightedDir.y / length,
-        z: weightedDir.z / length
-    };
-    // Ensure normal points up
-    if (normal.y < 0) {
-        normal = { x: -normal.x, y: -normal.y, z: -normal.z };
-    }
-    return [centroid, normal];
+    return [centroid, { x: nx, y: ny, z: nz }];
 }
 //# sourceMappingURL=mod.js.map

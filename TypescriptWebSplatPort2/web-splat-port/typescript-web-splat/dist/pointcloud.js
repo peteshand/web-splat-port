@@ -1,355 +1,272 @@
-/**
- * TypeScript port of pointcloud.rs
- * Point cloud data structures and GPU buffer management
- */
+// pointcloud.ts
+// 1:1 port of pointcloud.rs to WebGPU (TypeScript)
 import { UniformBuffer } from './uniform.js';
-export function createDefaultGaussianCompressed() {
-    return {
-        xyz: { x: 0, y: 0, z: 0 },
-        opacity: 0,
-        scaleFactor: 0,
-        geometryIdx: 0,
-        shIdx: 0
-    };
+export class Quantization {
+    // Rust: #[repr(C)] { zero_point: i32, scale: f32, _pad: [u32; 2] }
+    zero_point;
+    scale;
+    _pad;
+    constructor(zero_point = 0, scale = 1) {
+        this.zero_point = zero_point;
+        this.scale = scale;
+        this._pad = [0, 0];
+    }
+    static new(zero_point, scale) {
+        return new Quantization(zero_point, scale);
+    }
 }
-export function createDefaultGaussian() {
-    return {
-        xyz: { x: 0, y: 0, z: 0 },
-        opacity: 0,
-        cov: [0, 0, 0, 0, 0, 0]
-    };
+export class GaussianQuantization {
+    color_dc;
+    color_rest;
+    opacity;
+    scaling_factor;
+    constructor(color_dc = new Quantization(), color_rest = new Quantization(), opacity = new Quantization(), scaling_factor = new Quantization()) {
+        this.color_dc = color_dc;
+        this.color_rest = color_rest;
+        this.opacity = opacity;
+        this.scaling_factor = scaling_factor;
+    }
 }
-export function createDefaultCovariance3D() {
-    return {
-        data: [0, 0, 0, 0, 0, 0]
-    };
+export class Aabb {
+    min;
+    max;
+    constructor(min, max) {
+        this.min = { ...min };
+        this.max = { ...max };
+    }
+    static unit() {
+        return new Aabb({ x: -1, y: -1, z: -1 }, { x: 1, y: 1, z: 1 });
+    }
+    static zeroed() {
+        return new Aabb({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 });
+    }
+    center() {
+        return {
+            x: (this.min.x + this.max.x) * 0.5,
+            y: (this.min.y + this.max.y) * 0.5,
+            z: (this.min.z + this.max.z) * 0.5,
+        };
+    }
+    radius() {
+        const dx = this.max.x - this.min.x;
+        const dy = this.max.y - this.min.y;
+        const dz = this.max.z - this.min.z;
+        return Math.sqrt(dx * dx + dy * dy + dz * dz) * 0.5;
+    }
+    size() {
+        return {
+            x: this.max.x - this.min.x,
+            y: this.max.y - this.min.y,
+            z: this.max.z - this.min.z,
+        };
+    }
+    grow(pos) {
+        this.min.x = Math.min(this.min.x, pos.x);
+        this.min.y = Math.min(this.min.y, pos.y);
+        this.min.z = Math.min(this.min.z, pos.z);
+        this.max.x = Math.max(this.max.x, pos.x);
+        this.max.y = Math.max(this.max.y, pos.y);
+        this.max.z = Math.max(this.max.z, pos.z);
+    }
+    grow_union(other) {
+        this.min.x = Math.min(this.min.x, other.min.x);
+        this.min.y = Math.min(this.min.y, other.min.y);
+        this.min.z = Math.min(this.min.z, other.min.z);
+        this.max.x = Math.max(this.max.x, other.max.x);
+        this.max.y = Math.max(this.max.y, other.max.y);
+        this.max.z = Math.max(this.max.z, other.max.z);
+    }
 }
-export function createDefaultQuantization() {
-    return {
-        zeroPoint: 0,
-        scale: 1.0,
-        _pad: [0, 0]
-    };
-}
-export function createQuantization(zeroPoint, scale) {
-    return {
-        zeroPoint,
-        scale,
-        _pad: [0, 0]
-    };
-}
-export function createDefaultGaussianQuantization() {
-    return {
-        colorDc: createDefaultQuantization(),
-        colorRest: createDefaultQuantization(),
-        opacity: createDefaultQuantization(),
-        scalingFactor: createDefaultQuantization()
-    };
-}
-export function createAabb(min, max) {
-    return { min, max };
-}
-export function createUnitAabb() {
-    return {
-        min: { x: -1, y: -1, z: -1 },
-        max: { x: 1, y: 1, z: 1 }
-    };
-}
-export function growAabb(aabb, pos) {
-    aabb.min.x = Math.min(aabb.min.x, pos.x);
-    aabb.min.y = Math.min(aabb.min.y, pos.y);
-    aabb.min.z = Math.min(aabb.min.z, pos.z);
-    aabb.max.x = Math.max(aabb.max.x, pos.x);
-    aabb.max.y = Math.max(aabb.max.y, pos.y);
-    aabb.max.z = Math.max(aabb.max.z, pos.z);
-}
-export function getAabbCorners(aabb) {
-    const corners = [
-        { x: 0, y: 0, z: 0 },
-        { x: 1, y: 0, z: 0 },
-        { x: 0, y: 1, z: 0 },
-        { x: 1, y: 1, z: 0 },
-        { x: 0, y: 0, z: 1 },
-        { x: 1, y: 0, z: 1 },
-        { x: 0, y: 1, z: 1 },
-        { x: 1, y: 1, z: 1 }
-    ];
-    const size = getAabbSize(aabb);
-    return corners.map(d => ({
-        x: aabb.min.x + size.x * d.x,
-        y: aabb.min.y + size.y * d.y,
-        z: aabb.min.z + size.z * d.z
-    }));
-}
-export function getAabbCenter(aabb) {
-    return {
-        x: (aabb.min.x + aabb.max.x) / 2,
-        y: (aabb.min.y + aabb.max.y) / 2,
-        z: (aabb.min.z + aabb.max.z) / 2
-    };
-}
-export function getAabbRadius(aabb) {
-    const dx = aabb.max.x - aabb.min.x;
-    const dy = aabb.max.y - aabb.min.y;
-    const dz = aabb.max.z - aabb.min.z;
-    return Math.sqrt(dx * dx + dy * dy + dz * dz) / 2;
-}
-export function getAabbSize(aabb) {
-    return {
-        x: aabb.max.x - aabb.min.x,
-        y: aabb.max.y - aabb.min.y,
-        z: aabb.max.z - aabb.min.z
-    };
-}
-export function growAabbUnion(aabb, other) {
-    aabb.min.x = Math.min(aabb.min.x, other.min.x);
-    aabb.min.y = Math.min(aabb.min.y, other.min.y);
-    aabb.min.z = Math.min(aabb.min.z, other.min.z);
-    aabb.max.x = Math.max(aabb.max.x, other.max.x);
-    aabb.max.y = Math.max(aabb.max.y, other.max.y);
-    aabb.max.z = Math.max(aabb.max.z, other.max.z);
-}
-/**
- * Main PointCloud class for GPU rendering
- */
+// Layout-compatible with WGSL struct Splat (5 x u32 = 20 bytes).
+export const BYTES_PER_SPLAT = 20;
+// ---- PointCloud (1:1 with Rust) ----
 export class PointCloud {
-    splat2dBuffer;
-    bindGroup;
-    renderBindGroup;
-    numPointsValue;
-    shDegValue;
-    bboxValue;
-    compressedValue;
-    centerValue;
-    upValue;
-    mipSplattingValue;
-    kernelSizeValue;
-    backgroundColorValue;
+    splat_2d_buffer;
+    // renamed private fields (leading underscore) to avoid clashing with methods
+    _bind_group;
+    _render_bind_group;
+    num_points;
+    sh_deg;
+    bbox_;
+    compressed_;
+    center_;
+    up_;
+    mip_splatting_;
+    kernel_size_;
+    background_color_;
+    vertex_buffer; // 3D gaussians
+    sh_buffer; // SH coefs
+    covars_buffer; // compressed only
+    quantization_uniform;
+    // ---- new(device, pc) ----
+    static new(device, pc) {
+        return new PointCloud(device, pc);
+    }
     constructor(device, pc) {
-        // Create 2D splat buffer
-        this.splat2dBuffer = device.createBuffer({
-            label: "2d gaussians buffer",
-            size: pc.numPoints * this.getSplatSize(),
-            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE,
-            mappedAtCreation: false
+        // 2D splats buffer (written by preprocess, read by vertex shader)
+        this.splat_2d_buffer = device.createBuffer({
+            label: '2d gaussians buffer',
+            size: pc.num_points * BYTES_PER_SPLAT,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE
         });
-        // Create render bind group
-        this.renderBindGroup = device.createBindGroup({
-            label: "point cloud rendering bind group",
-            layout: PointCloud.bindGroupLayoutRender(device),
-            entries: [{
+        // Render bind group (only points_2d at binding=2)
+        this._render_bind_group = device.createBindGroup({
+            label: 'point cloud rendering bind group',
+            layout: PointCloud.bind_group_layout_render(device),
+            entries: [
+                {
                     binding: 2,
-                    resource: {
-                        buffer: this.splat2dBuffer
-                    }
-                }]
+                    resource: { buffer: this.splat_2d_buffer }
+                }
+            ]
         });
-        // Create vertex buffer (3D gaussians)
-        const vertexBuffer = device.createBuffer({
-            label: "3d gaussians buffer",
-            size: pc.gaussianBuffer().byteLength,
+        // 3D gaussians + SH buffers
+        this.vertex_buffer = device.createBuffer({
+            label: '3d gaussians buffer',
+            size: pc.gaussian_buffer().byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             mappedAtCreation: true
         });
-        new Uint8Array(vertexBuffer.getMappedRange()).set(pc.gaussianBuffer());
-        vertexBuffer.unmap();
-        // Create SH coefficients buffer
-        const shBuffer = device.createBuffer({
-            label: "sh coefs buffer",
-            size: pc.shCoefsBuffer().byteLength,
+        new Uint8Array(this.vertex_buffer.getMappedRange()).set(new Uint8Array(pc.gaussian_buffer()));
+        this.vertex_buffer.unmap();
+        this.sh_buffer = device.createBuffer({
+            label: 'sh coefs buffer',
+            size: pc.sh_coefs_buffer().byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             mappedAtCreation: true
         });
-        new Uint8Array(shBuffer.getMappedRange()).set(pc.shCoefsBuffer());
-        shBuffer.unmap();
-        // Base bind group entries
-        const bindGroupEntries = [
-            {
-                binding: 0,
-                resource: { buffer: vertexBuffer }
-            },
-            {
-                binding: 1,
-                resource: { buffer: shBuffer }
-            },
-            {
-                binding: 2,
-                resource: { buffer: this.splat2dBuffer }
-            }
+        new Uint8Array(this.sh_buffer.getMappedRange()).set(new Uint8Array(pc.sh_coefs_buffer()));
+        this.sh_buffer.unmap();
+        // Build the preprocess bind group (compressed or not)
+        const entries = [
+            { binding: 0, resource: { buffer: this.vertex_buffer } }, // read-only
+            { binding: 1, resource: { buffer: this.sh_buffer } }, // read-only
+            { binding: 2, resource: { buffer: this.splat_2d_buffer } } // read-write
         ];
-        // Create bind group based on compression
-        if (pc.isCompressed()) {
-            // Add covariance buffer
-            const covarsBuffer = device.createBuffer({
-                label: "Covariances buffer",
-                size: (pc.covars?.length || 0) * 6 * 2, // 6 f16 values
+        if (pc.compressed()) {
+            // binding 3: covariances (storage read-only)
+            if (!pc.covars)
+                throw new Error('compressed() true but covars missing');
+            this.covars_buffer = device.createBuffer({
+                label: 'Covariances buffer',
+                size: pc.covars.byteLength ?? pc.covars.byteLength,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
                 mappedAtCreation: true
             });
-            if (pc.covars) {
-                const covarsData = new Uint8Array(covarsBuffer.getMappedRange());
-                // Convert covariance data to bytes (simplified)
-                let offset = 0;
-                for (const covar of pc.covars) {
-                    for (const value of covar.data) {
-                        // Convert f16 to bytes (simplified - in practice need proper f16 conversion)
-                        const view = new DataView(covarsData.buffer, offset, 2);
-                        view.setUint16(0, Math.floor(value * 1000), true); // Simplified f16 conversion
-                        offset += 2;
-                    }
-                }
-            }
-            covarsBuffer.unmap();
-            // Add quantization uniform buffer
-            const quantizationUniform = UniformBuffer.new(device, pc.quantization || createDefaultGaussianQuantization(), "quantization uniform buffer");
-            bindGroupEntries.push({
-                binding: 3,
-                resource: { buffer: covarsBuffer }
-            }, {
-                binding: 4,
-                resource: { buffer: quantizationUniform.getBuffer() }
-            });
-            this.bindGroup = device.createBindGroup({
-                label: "point cloud bind group (compressed)",
-                layout: PointCloud.bindGroupLayoutCompressed(device),
-                entries: bindGroupEntries
+            new Uint8Array(this.covars_buffer.getMappedRange()).set(pc.covars instanceof ArrayBuffer ? new Uint8Array(pc.covars) : new Uint8Array(pc.covars));
+            this.covars_buffer.unmap();
+            entries.push({ binding: 3, resource: { buffer: this.covars_buffer } });
+            // binding 4: quantization uniform
+            if (!pc.quantization)
+                throw new Error('compressed() true but quantization missing');
+            this.quantization_uniform = UniformBuffer.new(device, pc.quantization, 'quantization uniform buffer');
+            entries.push({ binding: 4, resource: { buffer: this.quantization_uniform.bufferRef() } });
+            this._bind_group = device.createBindGroup({
+                label: 'point cloud bind group (compressed)',
+                layout: PointCloud.bind_group_layout_compressed(device),
+                entries
             });
         }
         else {
-            this.bindGroup = device.createBindGroup({
-                label: "point cloud bind group",
-                layout: PointCloud.bindGroupLayout(device),
-                entries: bindGroupEntries
+            this._bind_group = device.createBindGroup({
+                label: 'point cloud bind group',
+                layout: PointCloud.bind_group_layout(device),
+                entries
             });
         }
-        // Set properties
-        this.numPointsValue = pc.numPoints;
-        this.shDegValue = pc.shDeg;
-        this.compressedValue = pc.isCompressed();
-        this.bboxValue = pc.aabb;
-        this.centerValue = pc.center;
-        this.upValue = pc.up;
-        this.mipSplattingValue = pc.mipSplatting;
-        this.kernelSizeValue = pc.kernelSize;
-        this.backgroundColorValue = pc.backgroundColor ? {
-            r: pc.backgroundColor[0],
-            g: pc.backgroundColor[1],
-            b: pc.backgroundColor[2],
-            a: 1.0
-        } : undefined;
+        // mirror Rust fields
+        this.num_points = pc.num_points >>> 0;
+        this.sh_deg = pc.sh_deg >>> 0;
+        this.compressed_ = pc.compressed();
+        this.bbox_ = new Aabb(pc.aabb.min, pc.aabb.max);
+        this.center_ = { ...pc.center };
+        this.up_ = pc.up ? { ...pc.up } : undefined;
+        this.mip_splatting_ = pc.mip_splatting;
+        this.kernel_size_ = pc.kernel_size;
+        this.background_color_ = pc.background_color
+            ? { r: pc.background_color[0], g: pc.background_color[1], b: pc.background_color[2], a: 1.0 }
+            : undefined;
     }
-    compressed() {
-        return this.compressedValue;
-    }
-    numPoints() {
-        return this.numPointsValue;
-    }
-    bbox() {
-        return this.bboxValue;
-    }
-    getBindGroup() {
-        return this.bindGroup;
-    }
-    getRenderBindGroup() {
-        return this.renderBindGroup;
-    }
-    mipSplatting() {
-        return this.mipSplattingValue;
-    }
-    dilationKernelSize() {
-        return this.kernelSizeValue;
-    }
-    center() {
-        return this.centerValue;
-    }
-    up() {
-        return this.upValue;
-    }
-    getSplatSize() {
-        // Size of Splat struct: Vector4f16 + Vector2f16 + Vector4f16
-        // Each f16 is 2 bytes: (4 + 2 + 4) * 2 = 20 bytes
-        return 20;
-    }
-    static bindGroupLayoutCompressed(device) {
+    // ---- getters matching Rust API ----
+    compressed() { return this.compressed_; }
+    numPoints() { return this.num_points; }
+    shDeg() { return this.sh_deg; }
+    bbox() { return this.bbox_; }
+    // Rust names (methods) — keep names; return the underscored fields
+    bind_group() { return this._bind_group; }
+    render_bind_group() { return this._render_bind_group; }
+    // TS-friendly aliases used by your renderer.ts:
+    getBindGroup() { return this._bind_group; }
+    getRenderBindGroup() { return this._render_bind_group; }
+    mipSplatting() { return this.mip_splatting_; }
+    dilationKernelSize() { return this.kernel_size_; }
+    center() { return this.center_; }
+    up() { return this.up_; }
+    // ---- static bind group layouts (exact bindings/visibility as Rust) ----
+    static bind_group_layout_compressed(device) {
         return device.createBindGroupLayout({
-            label: "point cloud bind group layout (compressed)",
+            label: 'point cloud bind group layout (compressed)',
             entries: [
                 {
                     binding: 0,
                     visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
+                    buffer: { type: 'read-only-storage', hasDynamicOffset: false }
                 },
                 {
                     binding: 1,
                     visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
+                    buffer: { type: 'read-only-storage', hasDynamicOffset: false }
                 },
                 {
                     binding: 2,
                     visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "storage"
-                    }
+                    buffer: { type: 'storage', hasDynamicOffset: false }
                 },
                 {
                     binding: 3,
                     visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
+                    buffer: { type: 'read-only-storage', hasDynamicOffset: false }
                 },
                 {
                     binding: 4,
                     visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "uniform"
-                    }
+                    buffer: { type: 'uniform', hasDynamicOffset: false }
                 }
             ]
         });
     }
-    static bindGroupLayout(device) {
+    static bind_group_layout(device) {
         return device.createBindGroupLayout({
-            label: "point cloud float bind group layout",
+            label: 'point cloud float bind group layout',
             entries: [
                 {
                     binding: 0,
                     visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
+                    buffer: { type: 'read-only-storage', hasDynamicOffset: false }
                 },
                 {
                     binding: 1,
                     visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
+                    buffer: { type: 'read-only-storage', hasDynamicOffset: false }
                 },
                 {
                     binding: 2,
                     visibility: GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "storage"
-                    }
+                    buffer: { type: 'storage', hasDynamicOffset: false }
                 }
             ]
         });
     }
-    static bindGroupLayoutRender(device) {
+    static bind_group_layout_render(device) {
         return device.createBindGroupLayout({
-            label: "point cloud rendering bind group layout",
-            entries: [{
+            label: 'point cloud rendering bind group layout',
+            entries: [
+                {
                     binding: 2,
                     visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
-                    buffer: {
-                        type: "read-only-storage"
-                    }
-                }]
+                    buffer: { type: 'read-only-storage', hasDynamicOffset: false }
+                }
+            ]
         });
     }
 }

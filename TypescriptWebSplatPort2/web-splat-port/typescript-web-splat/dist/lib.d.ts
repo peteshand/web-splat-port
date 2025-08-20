@@ -1,58 +1,56 @@
-/**
- * TypeScript port of lib.rs
- * Main library entry point with re-exports and WebGPU context
- */
-export * from './uniform.js';
-export * from './utils.js';
-export * from './pointcloud.js';
-export * from './camera.js';
-export * from './animation.js';
-export * from './controller.js';
-export * from './renderer.js';
-export * from './scene.js';
-export * from './gpu_rs.js';
-export * from './io/mod.js';
-import { GenericGaussianPointCloud } from './io/mod.js';
-export { GenericGaussianPointCloud } from './io/mod';
-export { GaussianRenderer, SplattingArgs, Display } from './renderer';
-export { Scene, SceneCamera, Split } from './scene';
-export { GPURSSorter, PointCloudSortStuff } from './gpu_rs';
-export { UniformBuffer } from './uniform';
-export interface RenderConfig {
-    noVsync: boolean;
-    skybox?: string;
+type FullOutput = unknown;
+export declare class RenderConfig {
+    no_vsync: boolean;
+    skybox: string | null;
     hdr: boolean;
+    constructor(no_vsync: boolean, skybox?: string | null, hdr?: boolean);
 }
 export declare class WGPUContext {
     device: GPUDevice;
     queue: GPUQueue;
     adapter: GPUAdapter;
-    constructor(device: GPUDevice, queue: GPUQueue, adapter: GPUAdapter);
-    static newInstance(): Promise<WGPUContext>;
-    initialize(): Promise<void>;
+    static new_instance(): Promise<WGPUContext>;
+    static new(_instance?: unknown, _surface?: GPUCanvasContext | null): Promise<WGPUContext>;
+}
+export declare class WindowContext {
+    private wgpu_context;
+    private surface;
+    private config;
+    private window;
+    private scale_factor;
+    private pc;
+    private pointcloud_file_path;
+    private renderer;
+    private animation;
+    private controller;
+    private scene;
+    private scene_file_path;
+    private current_view;
+    private ui_renderer;
+    private fps;
+    private ui_visible;
+    private display;
+    private splatting_args;
+    private saved_cameras;
+    private stopwatch;
+    static new(window: HTMLCanvasElement, pc_file: any, render_config: RenderConfig): Promise<WindowContext>;
+    reload(): void;
+    resize(new_size: {
+        width: number;
+        height: number;
+    }, scale_factor?: number): void;
+    ui(): [boolean, FullOutput];
+    update(dt_seconds: number): void;
+    render(redraw_scene: boolean, shapes?: FullOutput): void;
+    private set_scene;
+    private set_env_map;
+    private cancle_animation;
+    private stop_animation;
+    private update_camera;
+    private save_view;
 }
 export declare function smoothstep(x: number): number;
-/**
- * Create a WebSplat viewer for browser usage
- */
-export declare function createWebSplatViewer(canvas: HTMLCanvasElement, pointCloud: GenericGaussianPointCloud): Promise<WebSplatViewer>;
-/**
- * WebSplat viewer class for managing the rendering
- */
-export declare class WebSplatViewer {
-    private canvas;
-    private wgpuContext;
-    private pointCloud;
-    private renderer?;
-    private scene?;
-    private camera?;
-    private controller?;
-    private animationId?;
-    constructor(canvas: HTMLCanvasElement, wgpuContext: WGPUContext, pointCloud: GenericGaussianPointCloud);
-    initialize(): Promise<void>;
-    private startRenderLoop;
-    private update;
-    private render;
-    destroy(): void;
-}
+export declare function open_window(file: any, scene_file: any | null, config: RenderConfig, pointcloud_file_path: string | null, scene_file_path: string | null): Promise<void>;
+export declare function run_wasm(pc: ArrayBuffer, scene: ArrayBuffer | null, pc_file: string | null, scene_file: string | null): Promise<void>;
+export {};
 //# sourceMappingURL=lib.d.ts.map
