@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "_build": "tsc",
-    "build": "esbuild src/lib.ts --bundle --format=esm --platform=browser --sourcemap --outfile=dist/web_splat.js",
+    "copy-shaders": "copyfiles -u 1 \"src/shaders/**/*\" dist",
+    "build": "esbuild src/lib.ts --bundle --format=esm --platform=browser --sourcemap --outfile=dist/web_splat.js && npm run copy-shaders",
     "dev": "tsc --watch",
     "serve": "http-server dist -p 8080",
     "clean": "rm -rf dist"
@@ -21,6 +22,7 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@webgpu/types": "^0.1.44",
+    "copyfiles": "^2.4.1",
     "esbuild": "^0.25.9",
     "http-server": "^14.1.1",
     "typescript": "^5.0.0"

@@ -3189,8 +3189,8 @@ function build_proj(znear, zfar, fov_x, fov_y) {
   m[8] = (right + left) / (right - left);
   m[9] = (top + bottom) / (top - bottom);
   m[10] = zfar / (zfar - znear);
-  m[11] = -(zfar * znear) / (zfar - znear);
-  m[14] = 1;
+  m[14] = -(zfar * znear) / (zfar - znear);
+  m[11] = 1;
   m[15] = 0;
   return m;
 }
@@ -3490,6 +3490,17 @@ var UniformBuffer = class _UniformBuffer {
 };
 
 // src/pointcloud.ts
+function toArrayBuffer(src) {
+  if (src instanceof ArrayBuffer) return src.slice(0);
+  const { buffer, byteOffset, byteLength } = src;
+  return buffer.slice(byteOffset, byteOffset + byteLength);
+}
+function halfToFloat(h) {
+  const s = (h & 32768) >> 15, e = (h & 31744) >> 10, f = h & 1023;
+  if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+  if (e === 31) return f ? NaN : (s ? -1 : 1) * Infinity;
+  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+}
 var Aabb = class _Aabb {
   min;
   max;
@@ -3562,11 +3573,15 @@ var PointCloud = class _PointCloud {
   covars_buffer;
   // compressed only
   quantization_uniform;
+  _gaussianSrc;
+  _shSrc;
   // ---- new(device, pc) ----
   static new(device, pc) {
     return new _PointCloud(device, pc);
   }
   constructor(device, pc) {
+    this._gaussianSrc = toArrayBuffer(pc.gaussian_buffer());
+    this._shSrc = toArrayBuffer(pc.sh_coefs_buffer());
     this.splat_2d_buffer = device.createBuffer({
       label: "2d gaussians buffer",
       size: pc.num_points * BYTES_PER_SPLAT,
@@ -3643,6 +3658,27 @@ var PointCloud = class _PointCloud {
     this.mip_splatting_ = pc.mip_splatting;
     this.kernel_size_ = pc.kernel_size;
     this.background_color_ = pc.background_color ? { r: pc.background_color[0], g: pc.background_color[1], b: pc.background_color[2], a: 1 } : void 0;
+  }
+  // --- DEBUG: log first Gaussian & SH buffer sanity info
+  debugLogFirstGaussian() {
+    const buf = this._gaussianSrc;
+    if (!buf) {
+      console.warn("[pc] no gaussian src captured");
+      return;
+    }
+    const dv = new DataView(buf);
+    const halves = [];
+    for (let i = 0; i < 10; i++) halves.push(dv.getUint16(i * 2, true));
+    const floats = halves.map(halfToFloat);
+    const xyz = floats.slice(0, 3);
+    const opacity = floats[3];
+    const cov = floats.slice(4);
+    console.log("[pc] first gaussian (halfs):", halves);
+    console.log("[pc] first gaussian (floats):", { xyz, opacity, cov });
+    console.log("[pc] aabb:", this.bbox_);
+    console.log("[pc] num_points:", this.num_points);
+    const expectedSH = this.num_points * 24 * 4;
+    console.log("[pc] sh bytes:", this._shSrc?.byteLength, "expected:", expectedSH);
   }
   // ---- getters matching Rust API ----
   compressed() {
@@ -3769,6 +3805,14 @@ function writeGeneralInfo(info) {
   dv.setUint32(8, info.passes >>> 0, true);
   dv.setUint32(12, info.even_pass >>> 0, true);
   dv.setUint32(16, info.odd_pass >>> 0, true);
+  return new Uint8Array(buf);
+}
+function writeIndirectDispatch(id) {
+  const buf = new ArrayBuffer(12);
+  const dv = new DataView(buf);
+  dv.setUint32(0, id.dispatch_x >>> 0, true);
+  dv.setUint32(4, id.dispatch_y >>> 0, true);
+  dv.setUint32(8, id.dispatch_z >>> 0, true);
   return new Uint8Array(buf);
 }
 var GPURSSorter = class _GPURSSorter {
@@ -4067,7 +4111,7 @@ const rs_mem_sweep_2_offset: u32 = ${rs_mem_sweep_2_offset}u;
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT
     });
     {
-      const bytes = writeGeneralInfo(uniform_infos);
+      const bytes = writeIndirectDispatch(dispatch_infos);
       device.queue.writeBuffer(
         dispatch_buffer,
         // your buffer at 381
@@ -4564,6 +4608,29 @@ var GaussianRenderer = class _GaussianRenderer {
     this.renderSorterLayout = renderSorterLayout;
     this.sortPreLayout = sortPreLayout;
   }
+  async getVisibleInstanceCount(device) {
+    const staging = device.createBuffer({
+      label: "readback indirect",
+      size: 16,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(this.drawIndirectBuffer, 0, staging, 0, 16);
+    device.queue.submit([enc.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const dv = new DataView(staging.getMappedRange());
+    const vertexCount = dv.getUint32(0, true);
+    const instanceCount = dv.getUint32(4, true);
+    staging.unmap();
+    console.log("[indirect] vertexCount:", vertexCount, "instanceCount:", instanceCount);
+    return instanceCount;
+  }
+  camera() {
+    return this.cameraUB;
+  }
+  render_settings() {
+    return this.settingsUB;
+  }
   static async create(device, queue, colorFormat, shDeg, compressed) {
     const sorter = await GPURSSorter.create(device, queue);
     const pcRenderLayout = PointCloud.bind_group_layout_render(device);
@@ -4738,6 +4805,17 @@ var GaussianRenderer = class _GaussianRenderer {
       4,
       4
     );
+    {
+      const tmp = device.createBuffer({
+        label: "debug instance_count",
+        size: 4,
+        usage: GPUBufferUsage.COPY_SRC,
+        mappedAtCreation: true
+      });
+      new DataView(tmp.getMappedRange()).setUint32(0, pc.numPoints() >>> 0, true);
+      tmp.unmap();
+      encoder.copyBufferToBuffer(tmp, 0, this.drawIndirectBuffer, 4, 4);
+    }
   }
   render(renderPass, pc) {
     renderPass.setBindGroup(0, pc.getRenderBindGroup());
@@ -5433,30 +5511,40 @@ function startsWith(buf, sig) {
   return true;
 }
 function f32_to_f16(val) {
-  const f = new Float32Array(1);
-  const i = new Int32Array(f.buffer);
-  f[0] = val;
-  const x = i[0];
-  const sign = x >> 16 & 32768;
+  const f32 = new Float32Array(1);
+  const u32 = new Uint32Array(f32.buffer);
+  f32[0] = val;
+  const x = u32[0];
+  const sign = x >>> 16 & 32768;
+  let exp2 = x >>> 23 & 255;
   let mant = x & 8388607;
-  let exp2 = x >> 23 & 255;
-  if (exp2 === 255) return sign | (mant ? 32256 : 31744);
-  if (exp2 > 112) return sign | 31744;
-  if (exp2 < 113) {
-    const shift = 113 - exp2;
-    if (shift > 24) return sign;
-    mant = (mant | 8388608) >> shift;
+  if (exp2 === 255) {
+    return sign | 31744 | (mant ? 1 : 0);
+  }
+  if (exp2 === 0) {
+    return sign;
+  }
+  let e = exp2 - 112;
+  if (e <= 0) {
+    if (e < -10) {
+      return sign;
+    }
+    mant = (mant | 8388608) >>> 1 - e;
     if (mant & 4096) mant += 8192;
-    return sign | mant >> 13;
+    return sign | mant >>> 13;
   }
-  exp2 = exp2 - 112;
-  mant = mant + 4096;
-  if (mant & 8388608) {
-    mant = 0;
-    exp2 += 1;
+  if (e >= 31) {
+    return sign | 31744;
   }
-  if (exp2 >= 31) return sign | 31744;
-  return sign | exp2 << 10 | mant >> 13;
+  if (mant & 4096) {
+    mant += 8192;
+    if (mant & 8388608) {
+      mant = 0;
+      e += 1;
+      if (e >= 31) return sign | 31744;
+    }
+  }
+  return sign | e << 10 | mant >>> 13 & 1023;
 }
 function writeF16(view, byteOffset, v) {
   view.setUint16(byteOffset, f32_to_f16(v), true);
@@ -5836,7 +5924,12 @@ var WGPUContext = class _WGPUContext {
     if (!("gpu" in navigator)) throw new Error("WebGPU not available");
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error("No WebGPU adapter");
-    const device = await adapter.requestDevice({});
+    const device = await adapter.requestDevice({
+      requiredLimits: {
+        maxComputeWorkgroupStorageSize: 1 << 15
+        // 32768
+      }
+    });
     const ctx = new _WGPUContext();
     ctx.adapter = adapter;
     ctx.device = device;
@@ -5895,6 +5988,7 @@ var WindowContext = class _WindowContext {
     };
     const pc_raw = await GenericGaussianPointCloud?.load?.(pc_file) ?? pc_file;
     state.pc = await PointCloud.new(wgpu_context.device, pc_raw);
+    state.pc.debugLogFirstGaussian?.();
     state.renderer = await GaussianRenderer.create(
       wgpu_context.device,
       wgpu_context.queue,
@@ -5913,6 +6007,7 @@ var WindowContext = class _WindowContext {
     const controller = new CameraController(0.1, 0.05);
     const c = state.pc.center();
     controller.center = vec3_exports.fromValues(c.x, c.y, c.z);
+    state.controller = controller;
     state.ui_renderer = new EguiWGPU(wgpu_context.device, surface_format, window2);
     state.display = await Display.create(
       wgpu_context.device,
@@ -6049,8 +6144,8 @@ var WindowContext = class _WindowContext {
       pass.end();
     }
     if (this.stopwatch) this.stopwatch.stop(encoder, "rasterization");
-    const cameraBG = this.renderer.unifiedUniform.getCameraBindGroup();
-    const settingsBG = this.renderer.unifiedUniform.getSettingsBindGroup();
+    const cameraBG = this.renderer.camera().bind_group();
+    const settingsBG = this.renderer.render_settings().bind_group();
     this.display.render(
       encoder,
       view_rgb,
@@ -6070,6 +6165,11 @@ var WindowContext = class _WindowContext {
     if (ui_state) this.ui_renderer.cleanup(ui_state);
     this.wgpu_context.queue.submit([encoder.finish()]);
     texture.present?.();
+    if (redraw_scene) {
+      void this.renderer.getVisibleInstanceCount(this.wgpu_context.device).then((n) => {
+        console.log("[indirect] instanceCount (post-submit):", n);
+      });
+    }
     this.splatting_args.resolution = vec2_exports.fromValues(this.config.width, this.config.height);
   }
   set_scene(scene) {

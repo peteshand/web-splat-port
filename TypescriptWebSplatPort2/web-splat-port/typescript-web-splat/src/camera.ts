@@ -29,27 +29,27 @@ export function world2view(r: mat3, t: vec3): mat4 {
 }
 
 export function build_proj(znear: number, zfar: number, fov_x: number, fov_y: number): mat4 {
-  // Mirrors camera.rs build_proj(), taking its final transpose into account for column-major.
-  const tanHalfY = Math.tan(fov_y * 0.5);
-  const tanHalfX = Math.tan(fov_x * 0.5);
-
-  const top = tanHalfY * znear;
-  const bottom = -top;
-  const right = tanHalfX * znear;
-  const left = -right;
-
-  const m = mat4.create();
-  // After transpose in Rust, the resulting column-major layout is:
-  m[0]  = (2 * znear) / (right - left); // m00
-  m[5]  = (2 * znear) / (top - bottom); // m11
-  m[8]  = (right + left) / (right - left); // m20
-  m[9]  = (top + bottom) / (top - bottom); // m21
-  m[10] = zfar / (zfar - znear);            // m22
-  m[11] = -(zfar * znear) / (zfar - znear); // m23
-  m[14] = 1;                                 // m32
-  m[15] = 0;                                 // m33
-  return m;
-}
+    // Mirrors camera.rs build_proj(), including its final transpose, in gl-matrix column-major.
+    const tanHalfY = Math.tan(fov_y * 0.5);
+    const tanHalfX = Math.tan(fov_x * 0.5);
+  
+    const top = tanHalfY * znear;
+    const bottom = -top;
+    const right = tanHalfX * znear;
+    const left = -right;
+  
+    const m = mat4.create();
+    m[0]  = (2 * znear) / (right - left); // m00
+    m[5]  = (2 * znear) / (top - bottom); // m11
+    m[8]  = (right + left) / (right - left); // m20
+    m[9]  = (top + bottom) / (top - bottom); // m21
+    m[10] = zfar / (zfar - znear);             // m22
+    m[14] = -(zfar * znear) / (zfar - znear);  // m23  <-- moved here
+    m[11] = 1;                                  // m32  <-- and this here
+    m[15] = 0;                                  // m33
+    return m;
+  }
+  
 
 export function focal2fov(focal: number, pixels: number): number {
   return 2 * Math.atan(pixels / (2 * focal));

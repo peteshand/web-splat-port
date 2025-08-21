@@ -231,35 +231,58 @@ import {
   }
   
   // float32 -> float16 (uint16)
-  function f32_to_f16(val: number): number {
-    const f = new Float32Array(1);
-    const i = new Int32Array(f.buffer);
-    f[0] = val;
-    const x = i[0];
+function f32_to_f16(val: number): number {
+    const f32 = new Float32Array(1);
+    const u32 = new Uint32Array(f32.buffer); // unsigned to avoid arithmetic shifts
+    f32[0] = val;
+    const x = u32[0];
   
-    const sign = (x >> 16) & 0x8000;
-    let mant = x & 0x007fffff;
-    let exp = (x >> 23) & 0xff;
+    const sign = (x >>> 16) & 0x8000;       // sign in bit 15
+    let exp  = (x >>> 23) & 0xff;           // f32 biased exponent
+    let mant = x & 0x007fffff;              // f32 mantissa
   
-    if (exp === 0xff) return sign | (mant ? 0x7e00 : 0x7c00);
-    if (exp > 0x70) return sign | 0x7c00;
+    // NaN/Inf in f32
+    if (exp === 0xff) {
+      // preserve NaN payload minimally
+      return sign | 0x7c00 | ((mant ? 1 : 0) as number);
+    }
   
-    if (exp < 0x71) {
-      const shift = 0x71 - exp;
-      if (shift > 24) return sign;
-      mant = (mant | 0x00800000) >> shift;
+    if (exp === 0) {
+      // f32 subnormal/zero -> half zero (we could try to create subnormals, but GA data doesn’t need it)
+      return sign;
+    }
+  
+    // Re-bias exponent from f32->f16: e = exp - 127 + 15 = exp - 112
+    let e = exp - 112;
+  
+    if (e <= 0) {
+      // subnormal half (shift mantissa with hidden 1)
+      if (e < -10) {
+        // too small -> signed zero
+        return sign;
+      }
+      mant = (mant | 0x00800000) >>> (1 - e); // add hidden 1, shift right
+      // round to nearest even, keep top 10 bits
       if (mant & 0x00001000) mant += 0x00002000;
-      return sign | (mant >> 13);
+      return sign | (mant >>> 13);
     }
   
-    exp = exp - 0x70;
-    mant = mant + 0x00001000;
-    if (mant & 0x00800000) {
-      mant = 0;
-      exp += 1;
+    if (e >= 0x1f) {
+      // overflow -> Inf
+      return sign | 0x7c00;
     }
-    if (exp >= 0x1f) return sign | 0x7c00;
-    return sign | (exp << 10) | (mant >> 13);
+  
+    // normal half: round mantissa
+    if (mant & 0x00001000) {
+      mant += 0x00002000;
+      if (mant & 0x00800000) {
+        mant = 0;
+        e += 1;
+        if (e >= 0x1f) return sign | 0x7c00;
+      }
+    }
+  
+    return sign | (e << 10) | ((mant >>> 13) & 0x03ff);
   }
   
   function writeF16(view: DataView, byteOffset: number, v: number) {

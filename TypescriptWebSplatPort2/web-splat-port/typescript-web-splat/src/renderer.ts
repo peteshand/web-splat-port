@@ -193,6 +193,7 @@ class PreprocessPipeline {
     const wgslPath = compressed ? './shaders/preprocess_compressed.wgsl' : './shaders/preprocess.wgsl';
     const src = await (await fetch(wgslPath)).text();
     const code = `const MAX_SH_DEG : u32 = ${shDeg}u;\n${src}`;
+    
 
     const module = device.createShaderModule({ label: 'preprocess shader', code });
 
@@ -454,6 +455,31 @@ export class GaussianRenderer {
     this.sortPreLayout = sortPreLayout;
   }
 
+  async getVisibleInstanceCount(device: GPUDevice): Promise<number> {
+    // staging buffer for readback
+    const staging = device.createBuffer({
+      label: 'readback indirect',
+      size: 16,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+  
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(this.drawIndirectBuffer, 0, staging, 0, 16);
+    device.queue.submit([enc.finish()]);
+  
+    await staging.mapAsync(GPUMapMode.READ);
+    const dv = new DataView(staging.getMappedRange());
+    const vertexCount   = dv.getUint32(0, true);
+    const instanceCount = dv.getUint32(4, true);
+    staging.unmap();
+  
+    console.log('[indirect] vertexCount:', vertexCount, 'instanceCount:', instanceCount);
+    return instanceCount;
+  }
+
+  public camera(): UniformBuffer<ArrayBufferView> { return this.cameraUB; }
+  public render_settings(): UniformBuffer<ArrayBufferView> { return this.settingsUB; }
+
   static async create(
     device: GPUDevice,
     queue: GPUQueue,
@@ -693,6 +719,22 @@ export class GaussianRenderer {
       4,
       4
     );
+
+    // === DEBUG: force instance_count = numPoints (wins over previous copy) ===
+    {
+        const tmp = device.createBuffer({
+            label: 'debug instance_count',
+            size: 4,
+            usage: GPUBufferUsage.COPY_SRC,
+        mappedAtCreation: true,
+    });
+    // write pc.numPoints() LE u32 into tmp
+    new DataView(tmp.getMappedRange()).setUint32(0, pc.numPoints() >>> 0, true);
+    tmp.unmap();
+
+    // overwrite just the instanceCount field at +4
+    encoder.copyBufferToBuffer(tmp, 0, this.drawIndirectBuffer, 4, 4);
+    }
   }
 
   render(renderPass: GPURenderPassEncoder, pc: PointCloud): void {

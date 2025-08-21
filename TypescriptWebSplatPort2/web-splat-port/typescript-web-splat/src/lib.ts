@@ -53,7 +53,14 @@ export class WGPUContext {
     if (!('gpu' in navigator)) throw new Error('WebGPU not available');
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error('No WebGPU adapter');
-    const device = await adapter.requestDevice({});
+  
+    // Mirror wasm branch in Rust: only request the larger workgroup storage size.
+    const device = await adapter.requestDevice({
+      requiredLimits: {
+        maxComputeWorkgroupStorageSize: 1 << 15 // 32768
+      }
+    });
+  
     const ctx = new WGPUContext();
     ctx.adapter = adapter;
     ctx.device = device;
@@ -141,6 +148,9 @@ export class WindowContext {
       (await (io as any).GenericGaussianPointCloud?.load?.(pc_file)) ?? pc_file;
     state.pc = await PointCloud.new(wgpu_context.device, pc_raw);
 
+    // DEBUG: confirm the first gaussian decodes reasonably
+    (state.pc as any).debugLogFirstGaussian?.();
+
     state.renderer = await GaussianRenderer.create(
       wgpu_context.device,
       wgpu_context.queue,
@@ -162,6 +172,8 @@ export class WindowContext {
     const controller = new CameraController(0.1, 0.05);
     const c = state.pc.center();
     controller.center = vec3.fromValues(c.x, c.y, c.z);
+
+    state.controller = controller;
 
     state.ui_renderer = new EguiWGPU(wgpu_context.device, surface_format, window);
 
@@ -282,18 +294,19 @@ export class WindowContext {
 
   render(redraw_scene: boolean, shapes?: FullOutput): void {
     this.stopwatch?.reset();
-
+  
     const texture = (this.surface as any).getCurrentTexture?.();
     if (!texture) return;
-
-    const view_rgb = texture.createView({ format: deSRGB(this.config.format) });
+  
+    const view_rgb  = texture.createView({ format: deSRGB(this.config.format) });
     const view_srgb = texture.createView();
-
+  
     const encoder = this.wgpu_context.device.createCommandEncoder({
       label: 'render command encoder'
     });
-
+  
     if (redraw_scene) {
+      // Prepare: preprocess + sort + copy instanceCount into indirect buffer
       this.renderer.prepare(
         encoder,
         this.wgpu_context.device,
@@ -303,7 +316,7 @@ export class WindowContext {
         this.stopwatch ?? undefined
       );
     }
-
+  
     let ui_state: FullOutput | null = null;
     if (shapes) {
       ui_state = this.ui_renderer.prepare(
@@ -315,7 +328,7 @@ export class WindowContext {
         shapes
       );
     }
-
+  
     if (this.stopwatch) this.stopwatch.start(encoder, 'rasterization');
     if (redraw_scene) {
       const pass = encoder.beginRenderPass({
@@ -331,10 +344,12 @@ export class WindowContext {
       pass.end();
     }
     if (this.stopwatch) this.stopwatch.stop(encoder, 'rasterization');
-
-    // Access camera/settings bind groups from GaussianRenderer’s unified uniform
-    const cameraBG = (this.renderer as any).unifiedUniform.getCameraBindGroup();
-    const settingsBG = (this.renderer as any).unifiedUniform.getSettingsBindGroup();
+  
+    // Access camera/settings bind groups from GaussianRenderer’s uniforms
+    const cameraBG   = this.renderer.camera().bind_group();
+    const settingsBG = this.renderer.render_settings().bind_group();
+  
+    // Composite to the swapchain
     this.display.render(
       encoder,
       view_rgb,
@@ -342,8 +357,10 @@ export class WindowContext {
       cameraBG,
       settingsBG
     );
+  
     this.stopwatch?.end(encoder);
-
+  
+    // UI overlay (sRGB)
     if (ui_state) {
       const pass = encoder.beginRenderPass({
         label: 'render pass ui',
@@ -353,10 +370,22 @@ export class WindowContext {
       pass.end();
     }
     if (ui_state) this.ui_renderer.cleanup(ui_state);
-
+  
+    // ---- Submit GPU work for this frame ----
     this.wgpu_context.queue.submit([encoder.finish()]);
     (texture as any).present?.();
-
+  
+    // Only AFTER submit do the async readback of instanceCount
+    if (redraw_scene) {
+      void this.renderer
+        .getVisibleInstanceCount(this.wgpu_context.device)
+        .then((n) => {
+          // This reflects the work we just submitted
+          console.log('[indirect] instanceCount (post-submit):', n);
+        });
+    }
+  
+    // Keep args in sync
     this.splatting_args.resolution = vec2.fromValues(this.config.width, this.config.height);
   }
 

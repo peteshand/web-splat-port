@@ -106,7 +106,7 @@ var<storage, read_write> sort_indices : array<u32>;
 @group(2) @binding(3)
 var<storage, read_write> sort_dispatch: DispatchIndirect;
 
-@group(0) @binding(1)
+@group(3) @binding(0)
 var<uniform> render_settings: RenderSettings;
 
 

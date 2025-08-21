@@ -390,7 +390,7 @@ const rs_mem_sweep_2_offset: u32 = ${rs_mem_sweep_2_offset}u;
     });
     
     {
-        const bytes = writeGeneralInfo(uniform_infos);            // or whatever function you call there
+        const bytes = writeIndirectDispatch(dispatch_infos);
         device.queue.writeBuffer(
             dispatch_buffer,                                    // your buffer at 381
           0,

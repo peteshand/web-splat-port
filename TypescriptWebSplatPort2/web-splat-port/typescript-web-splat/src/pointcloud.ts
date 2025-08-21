@@ -11,6 +11,21 @@ export type Color3 = [number, number, number];
 export type Point3f32 = { x: number; y: number; z: number };
 export type Vector3f32 = { x: number; y: number; z: number };
 
+function toArrayBuffer(src: ArrayBuffer | ArrayBufferView): ArrayBuffer {
+    if (src instanceof ArrayBuffer) return src.slice(0);
+    // src is a view (e.g., Uint8Array)
+    const { buffer, byteOffset, byteLength } = src;
+    return buffer.slice(byteOffset, byteOffset + byteLength);
+}
+
+// (optional) f16 → f32 from my prior message
+function halfToFloat(h: number): number {
+    const s = (h & 0x8000) >> 15, e = (h & 0x7C00) >> 10, f = h & 0x03FF;
+    if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+    if (e === 31) return f ? NaN : ((s ? -1 : 1) * Infinity);
+    return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+
 export type Gaussian = {
     // Rust: Point3<f16> for xyz; we store as numbers and pack to f16 later
     xyz: Point3f32;
@@ -172,6 +187,9 @@ export class PointCloud {
     private sh_buffer!: GPUBuffer;     // SH coefs
     private covars_buffer?: GPUBuffer; // compressed only
     private quantization_uniform?: UniformBuffer<ArrayBufferView>;
+
+    private _gaussianSrc?: ArrayBuffer;
+    private _shSrc?: ArrayBuffer;
   
     // ---- new(device, pc) ----
     static new(device: GPUDevice, pc: GenericGaussianPointCloud): PointCloud {
@@ -180,6 +198,10 @@ export class PointCloud {
   
     private constructor(device: GPUDevice, pc: GenericGaussianPointCloud) {
       // 2D splats buffer (written by preprocess, read by vertex shader)
+
+      this._gaussianSrc = toArrayBuffer(pc.gaussian_buffer() as any);
+      this._shSrc       = toArrayBuffer(pc.sh_coefs_buffer() as any);
+
       this.splat_2d_buffer = device.createBuffer({
         label: '2d gaussians buffer',
         size: pc.num_points * BYTES_PER_SPLAT,
@@ -269,6 +291,30 @@ export class PointCloud {
       this.background_color_ = pc.background_color
         ? { r: pc.background_color[0], g: pc.background_color[1], b: pc.background_color[2], a: 1.0 }
         : undefined;
+    }
+
+    // --- DEBUG: log first Gaussian & SH buffer sanity info
+    public debugLogFirstGaussian(): void {
+        const buf = this._gaussianSrc;
+        if (!buf) { console.warn('[pc] no gaussian src captured'); return; }
+      
+        const dv = new DataView(buf);             // now guaranteed ArrayBuffer
+        // uncompressed: 10 halfs (20 bytes) per gaussian
+        const halves: number[] = [];
+        for (let i = 0; i < 10; i++) halves.push(dv.getUint16(i * 2, true));
+        const floats = halves.map(halfToFloat);
+      
+        const xyz = floats.slice(0, 3);
+        const opacity = floats[3];
+        const cov = floats.slice(4);
+      
+        console.log('[pc] first gaussian (halfs):', halves);
+        console.log('[pc] first gaussian (floats):', { xyz, opacity, cov });
+        console.log('[pc] aabb:', this.bbox_);
+        console.log('[pc] num_points:', this.num_points);
+      
+        const expectedSH = this.num_points * 24 * 4; // deg=3: 24 u32 per point
+        console.log('[pc] sh bytes:', this._shSrc?.byteLength, 'expected:', expectedSH);
     }
   
     // ---- getters matching Rust API ----
