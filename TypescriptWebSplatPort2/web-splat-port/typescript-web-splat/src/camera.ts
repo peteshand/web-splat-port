@@ -4,6 +4,13 @@
 import { mat4, mat3, vec3, vec2, quat } from 'gl-matrix';
 import type { Aabb } from './pointcloud';
 
+// ---- logging helper ----
+function clog(...args: any[]) {
+  // Prefixed so you can filter easily in DevTools
+  // (kept unconditional per your request for instrumentation)
+  console.log('[camera]', ...args);
+}
+
 // ---- Constants ----
 export const VIEWPORT_Y_FLIP: mat4 = mat4.fromValues(
   1,  0, 0, 0,
@@ -25,38 +32,44 @@ export function world2view(r: mat3, t: vec3): mat4 {
   world[15] = 1;
   const view = mat4.create();
   mat4.invert(view, world);
+  clog('world2view()', { r: Array.from(r), t: Array.from(t) });
   return view;
 }
 
 export function build_proj(znear: number, zfar: number, fov_x: number, fov_y: number): mat4 {
-    // Mirrors camera.rs build_proj(), including its final transpose, in gl-matrix column-major.
-    const tanHalfY = Math.tan(fov_y * 0.5);
-    const tanHalfX = Math.tan(fov_x * 0.5);
-  
-    const top = tanHalfY * znear;
-    const bottom = -top;
-    const right = tanHalfX * znear;
-    const left = -right;
-  
-    const m = mat4.create();
-    m[0]  = (2 * znear) / (right - left); // m00
-    m[5]  = (2 * znear) / (top - bottom); // m11
-    m[8]  = (right + left) / (right - left); // m20
-    m[9]  = (top + bottom) / (top - bottom); // m21
-    m[10] = zfar / (zfar - znear);             // m22
-    m[14] = -(zfar * znear) / (zfar - znear);  // m23  <-- moved here
-    m[11] = 1;                                  // m32  <-- and this here
-    m[15] = 0;                                  // m33
-    return m;
-  }
-  
+  // Mirrors camera.rs build_proj(), including its final transpose, in gl-matrix column-major.
+  const tanHalfY = Math.tan(fov_y * 0.5);
+  const tanHalfX = Math.tan(fov_x * 0.5);
+
+  const top = tanHalfY * znear;
+  const bottom = -top;
+  const right = tanHalfX * znear;
+  const left = -right;
+
+  const m = mat4.create();
+  m[0]  = (2 * znear) / (right - left);     // m00
+  m[5]  = (2 * znear) / (top - bottom);     // m11
+  m[8]  = (right + left) / (right - left);  // m20
+  m[9]  = (top + bottom) / (top - bottom);  // m21
+  m[10] = zfar / (zfar - znear);            // m22
+  m[14] = -(zfar * znear) / (zfar - znear); // m23
+  m[11] = 1;                                // m32
+  m[15] = 0;                                // m33
+
+  clog('build_proj()', { znear, zfar, fov_x, fov_y });
+  return m;
+}
 
 export function focal2fov(focal: number, pixels: number): number {
-  return 2 * Math.atan(pixels / (2 * focal));
+  const out = 2 * Math.atan(pixels / (2 * focal));
+  clog('focal2fov()', { focal, pixels, out });
+  return out;
 }
 
 export function fov2focal(fov: number, pixels: number): number {
-  return pixels / (2 * Math.tan(fov * 0.5));
+  const out = pixels / (2 * Math.tan(fov * 0.5));
+  clog('fov2focal()', { fov, pixels, out });
+  return out;
 }
 
 // ---- Interfaces / Types ----
@@ -97,43 +110,54 @@ export class PerspectiveProjection {
     this.znear = znear;
     this.zfar = zfar;
     this.fov2view_ratio = fov2view_ratio;
+    clog('PerspectiveProjection.ctor', { fovx, fovy, znear, zfar, fov2view_ratio });
   }
 
   static new(viewport: vec2, fov: vec2, znear: number, zfar: number): PerspectiveProjection {
     const vr = viewport[0] / viewport[1];
     const fr = fov[0] / fov[1];
+    clog('PerspectiveProjection.new()', { viewport: Array.from(viewport), fov: Array.from(fov), znear, zfar, vr, fr });
     return new PerspectiveProjection(fov[0], fov[1], znear, zfar, vr / fr);
   }
 
   projection_matrix(): mat4 { return this.projectionMatrix(); }
-  projectionMatrix(): mat4 { return build_proj(this.znear, this.zfar, this.fovx, this.fovy); }
+  projectionMatrix(): mat4 {
+    const m = build_proj(this.znear, this.zfar, this.fovx, this.fovy);
+    clog('projectionMatrix()', { fovx: this.fovx, fovy: this.fovy, znear: this.znear, zfar: this.zfar });
+    return m;
+  }
 
   resize(width: number, height: number): void {
+    const prev = { fovx: this.fovx, fovy: this.fovy };
     const ratio = width / height;
     if (width > height) {
       this.fovy = (this.fovx / ratio) * this.fov2view_ratio;
     } else {
       this.fovx = this.fovy * ratio * this.fov2view_ratio;
     }
+    clog('PerspectiveProjection.resize()', { width, height, ratio, before: prev, after: { fovx: this.fovx, fovy: this.fovy }, fov2view_ratio: this.fov2view_ratio });
   }
 
   /** Focal lengths in pixels for a given viewport */
   focal(viewport: vec2): vec2 {
-    return vec2.fromValues(
-      fov2focal(this.fovx, viewport[0]),
-      fov2focal(this.fovy, viewport[1])
-    );
+    const fx = fov2focal(this.fovx, viewport[0]);
+    const fy = fov2focal(this.fovy, viewport[1]);
+    const out = vec2.fromValues(fx, fy);
+    clog('PerspectiveProjection.focal()', { viewport: Array.from(viewport), fx, fy });
+    return out;
   }
 
   lerp(other: PerspectiveProjection, amount: number): PerspectiveProjection {
     const a = amount, b = 1 - amount;
-    return new PerspectiveProjection(
+    const out = new PerspectiveProjection(
       this.fovx * b + other.fovx * a,
       this.fovy * b + other.fovy * a,
       this.znear * b + other.znear * a,
       this.zfar * b + other.zfar * a,
       this.fov2view_ratio * b + other.fov2view_ratio * a
     );
+    clog('PerspectiveProjection.lerp()', { amount, from: { fovx: this.fovx, fovy: this.fovy, znear: this.znear, zfar: this.zfar, r: this.fov2view_ratio }, to: { fovx: other.fovx, fovy: other.fovy, znear: other.znear, zfar: other.zfar, r: other.fov2view_ratio }, out: { fovx: out.fovx, fovy: out.fovy, znear: out.znear, zfar: out.zfar, r: out.fov2view_ratio } });
+    return out;
   }
 }
 
@@ -147,9 +171,11 @@ export class PerspectiveCamera implements Camera {
     this.position = vec3.clone(position);
     this.rotation = quat.clone(rotation);
     this.projection = projection;
+    clog('PerspectiveCamera.ctor', { position: Array.from(this.position), rotation: Array.from(this.rotation) });
   }
 
   static default(): PerspectiveCamera {
+    clog('PerspectiveCamera.default()');
     return new PerspectiveCamera(
       vec3.fromValues(0, 0, -1),
       quat.fromValues(1, 0, 0, 0),
@@ -183,11 +209,16 @@ export class PerspectiveCamera implements Camera {
     mat4.fromRotationTranslation(w, this.rotation, this.position);
     const v = mat4.create();
     mat4.invert(v, w);
+    clog('PerspectiveCamera.viewMatrix()');
     return v;
   }
   view_matrix(): mat4 { return this.viewMatrix(); }
 
-  projMatrix(): mat4 { return this.projection.projectionMatrix(); }
+  projMatrix(): mat4 {
+    const m = this.projection.projectionMatrix();
+    clog('PerspectiveCamera.projMatrix()');
+    return m;
+  }
   proj_matrix(): mat4 { return this.projMatrix(); }
 
   positionVec(): vec3 { return vec3.clone(this.position); }
@@ -227,6 +258,7 @@ export class PerspectiveCamera implements Camera {
     const near   = normalize(add(r3, r2));
     const far    = normalize(sub(r3, r2));
 
+    clog('PerspectiveCamera.frustum_planes() computed');
     return { near, far, left, right, top, bottom };
   }
 
@@ -237,6 +269,8 @@ export class PerspectiveCamera implements Camera {
     const outRot = quat.create();
     quat.slerp(outRot, this.rotation, other.rotation, amount);
     const proj = this.projection.lerp(other.projection, amount);
-    return new PerspectiveCamera(outPos, outRot, proj);
+    const out = new PerspectiveCamera(outPos, outRot, proj);
+    clog('PerspectiveCamera.lerp()', { amount, fromPos: Array.from(this.position), toPos: Array.from(other.position) });
+    return out;
   }
 }

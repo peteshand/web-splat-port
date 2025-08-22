@@ -4,7 +4,7 @@ import { vec2, vec3, quat } from 'gl-matrix';
 import { GaussianRenderer, SplattingArgs, Display } from './renderer';
 import { PointCloud } from './pointcloud';
 import { Camera, PerspectiveCamera, PerspectiveProjection } from './camera';
-import { CameraController } from './controller';
+import { CameraController, KeyCode } from './controller';
 import * as io from './io/mod';
 import { Animation /*, TrackingShot, Transition*/ } from './animation';
 import { Scene, SceneCamera, Split } from './scene';
@@ -174,7 +174,18 @@ export class WindowContext {
     const r = aabb.radius();
     const eyeTuple: vec3 = vec3.fromValues(c0.x - r * 0.5, c0.y - r * 0.5, c0.z - r * 0.5);
     const rot: quat = quat.create();
-    const proj = new PerspectiveProjection(size.width, size.height, 45, 0.01, 1000);
+
+    // Match Rust: fov = (45°, 45°/aspect) in radians, and set fov2view_ratio via .new()
+    const fovx = (45 * Math.PI) / 180;
+    const fovy = ((45 / Math.max(1e-6, aspect)) * Math.PI) / 180;
+
+    const proj = PerspectiveProjection.new(
+      vec2.fromValues(size.width, size.height),
+      vec2.fromValues(fovx, fovy),
+      0.01,
+      1000
+    );
+
     const view_camera = new PerspectiveCamera(eyeTuple, rot, proj);
 
     const controller = new CameraController(0.1, 0.05);
@@ -488,6 +499,131 @@ export function smoothstep(x: number): number {
   return x * x * (3.0 - 2.0 * x);
 }
 
+/* --------------------------- input binding helper --------------------------- */
+
+function bind_input(canvas: HTMLCanvasElement, controller: CameraController) {
+  // Ensure keyboard focus can land on the canvas
+  if (!canvas.hasAttribute('tabindex')) canvas.tabIndex = 0;
+
+  let pressedPointerId: number | null = null;
+
+  const DEBUG = true; // flip to false to silence logs
+  const log = (...args: any[]) => { if (DEBUG) console.debug('[input]', ...args); };
+
+  const mapCode = (code: string): KeyCode | undefined => {
+    switch (code) {
+      case 'KeyW': case 'KeyS': case 'KeyA': case 'KeyD':
+      case 'ArrowUp': case 'ArrowDown': case 'ArrowLeft': case 'ArrowRight':
+      case 'KeyQ': case 'KeyE': case 'Space': case 'ShiftLeft':
+        return code as KeyCode;
+      default:
+        return undefined;
+    }
+  };
+
+  const updateAlt = (e: KeyboardEvent | PointerEvent | WheelEvent) => {
+    // Mirror winit's modifier tracking by sampling altKey on each event
+    // @ts-ignore
+    controller.alt_pressed = !!(e as any).altKey;
+  };
+
+  // Keyboard
+  const onKeyDown = (e: KeyboardEvent) => {
+    updateAlt(e);
+    const code = mapCode(e.code);
+    if (!code) return;
+    if (controller.process_keyboard(code, true)) {
+      log('keydown', code);
+      e.preventDefault();
+    }
+  };
+  const onKeyUp = (e: KeyboardEvent) => {
+    updateAlt(e);
+    const code = mapCode(e.code);
+    if (!code) return;
+    if (controller.process_keyboard(code, false)) {
+      log('keyup', code);
+      e.preventDefault();
+    }
+  };
+
+  // Pointer (mouse/touch/pen)
+  const onPointerDown = (e: PointerEvent) => {
+    updateAlt(e);
+    canvas.focus();
+    pressedPointerId = e.pointerId;
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
+    if (e.button === 0) controller.left_mouse_pressed  = true;
+    if (e.button === 2) controller.right_mouse_pressed = true;
+    log('pointerdown', e.button, 'alt=', controller.alt_pressed);
+    e.preventDefault();
+  };
+  const onPointerMove = (e: PointerEvent) => {
+    updateAlt(e);
+    const dx = e.movementX ?? 0;
+    const dy = e.movementY ?? 0;
+    if (controller.left_mouse_pressed || controller.right_mouse_pressed) {
+      controller.process_mouse(dx, dy);
+      log('pointermove', dx, dy);
+      e.preventDefault();
+    }
+  };
+  const onPointerUp = (e: PointerEvent) => {
+    updateAlt(e);
+    if (pressedPointerId === e.pointerId) {
+      try { canvas.releasePointerCapture(e.pointerId); } catch {}
+      pressedPointerId = null;
+    }
+    if (e.button === 0) controller.left_mouse_pressed  = false;
+    if (e.button === 2) controller.right_mouse_pressed = false;
+    log('pointerup', e.button);
+    e.preventDefault();
+  };
+
+  // Prevent browser context menu so right-drag pans like in Rust
+  const onContextMenu = (e: MouseEvent) => { e.preventDefault(); };
+
+  // Wheel
+  const onWheel = (e: WheelEvent) => {
+    updateAlt(e);
+    controller.process_scroll(e.deltaY / 100);
+    log('wheel', e.deltaY);
+    e.preventDefault(); // stop page scroll
+  };
+
+  // Blur: clear pressed flags similar to losing focus in winit
+  const onWindowBlur = () => {
+    controller.left_mouse_pressed = false;
+    controller.right_mouse_pressed = false;
+  };
+
+  // Attach
+  window.addEventListener('keydown', onKeyDown, { capture: true });
+  window.addEventListener('keyup', onKeyUp, { capture: true });
+  window.addEventListener('blur', onWindowBlur);
+
+  canvas.addEventListener('pointerdown', onPointerDown);
+  canvas.addEventListener('pointermove', onPointerMove);
+  canvas.addEventListener('pointerup', onPointerUp);
+  canvas.addEventListener('contextmenu', onContextMenu);
+  canvas.addEventListener('wheel', onWheel, { passive: false });
+
+  // Return unbind if you need teardown later
+  return () => {
+    window.removeEventListener('keydown', onKeyDown, { capture: true } as any);
+    window.removeEventListener('keyup', onKeyUp, { capture: true } as any);
+    window.removeEventListener('blur', onWindowBlur);
+
+    canvas.removeEventListener('pointerdown', onPointerDown);
+    canvas.removeEventListener('pointermove', onPointerMove);
+    canvas.removeEventListener('pointerup', onPointerUp);
+    canvas.removeEventListener('contextmenu', onContextMenu);
+    canvas.removeEventListener('wheel', onWheel as any);
+  };
+}
+
+/* --------------------------------------------------------------------------- */
+
 export async function open_window(
   file: any,
   scene: any | null,
@@ -517,6 +653,9 @@ export async function open_window(
   syncCanvasBackingStore();
 
   const state = await WindowContext.new(canvas, file, config);
+
+  // Bind input in the same place the Rust app wires winit events to the controller.
+  const _unbindInput = bind_input(canvas, (state as any)['controller'] as CameraController);
 
   // Keep TS path 1:1 with Rust resize semantics: CSS px -> backing store -> engine resize.
   const applySize = () => {

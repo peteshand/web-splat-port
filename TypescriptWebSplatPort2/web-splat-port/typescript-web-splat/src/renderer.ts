@@ -10,6 +10,11 @@ import {
   PointCloudSortStuff
 } from './gpu_rs';
 
+// ---- logging helper ----
+function rlog(...args: any[]) {
+  console.log('[renderer]', ...args);
+}
+
 /* ========================= CameraUniform ========================= */
 
 export class CameraUniform {
@@ -27,11 +32,13 @@ export class CameraUniform {
     this.projInvMatrix = mat4.create();
     this.viewport = vec2.fromValues(1.0, 1.0);
     this.focal = vec2.fromValues(1.0, 1.0);
+    rlog('CameraUniform.ctor');
   }
 
   setViewMat(viewMatrix: mat4): void {
     mat4.copy(this.viewMatrix, viewMatrix);
     mat4.invert(this.viewInvMatrix, viewMatrix);
+    rlog('CameraUniform.setViewMat()');
   }
 
   setProjMat(projMatrix: mat4): void {
@@ -39,19 +46,23 @@ export class CameraUniform {
     mat4.multiply(tmp, VIEWPORT_Y_FLIP, projMatrix);
     mat4.copy(this.projMatrix, tmp);
     mat4.invert(this.projInvMatrix, projMatrix);
+    rlog('CameraUniform.setProjMat()');
   }
 
   setCamera(camera: Camera): void {
+    rlog('CameraUniform.setCamera()');
     this.setProjMat(camera.projMatrix());
     this.setViewMat(camera.viewMatrix());
   }
 
   setViewport(viewport: vec2): void {
     vec2.copy(this.viewport, viewport);
+    rlog('CameraUniform.setViewport()', { viewport: Array.from(viewport) });
   }
 
   setFocal(focal: vec2): void {
     vec2.copy(this.focal, focal);
+    rlog('CameraUniform.setFocal()', { focal: Array.from(focal) });
   }
 }
 
@@ -119,6 +130,7 @@ export class SplattingArgsUniform {
       0.0
     );
     this.sceneCenter = vec4.fromValues(0, 0, 0, 0);
+    rlog('SplattingArgsUniform.ctor');
   }
 
   static fromArgsAndPc(args: SplattingArgs, pc: PointCloud): SplattingArgsUniform {
@@ -145,6 +157,16 @@ export class SplattingArgsUniform {
 
     const minExtend = bbox.radius();
     u.sceneExtend = Math.max(args.sceneExtend ?? minExtend, minExtend);
+
+    rlog('SplattingArgsUniform.fromArgsAndPc()', {
+      gaussianScaling: u.gaussianScaling,
+      maxShDeg: u.maxShDeg,
+      showEnvMap: !!u.showEnvMap,
+      mipSplatting: !!u.mipSplatting,
+      kernelSize: u.kernelSize,
+      walltime: u.walltime,
+      sceneExtend: u.sceneExtend
+    });
 
     return u;
   }
@@ -210,6 +232,7 @@ class PreprocessPipeline {
       compute: { module, entryPoint: 'preprocess' }
     });
 
+    rlog('PreprocessPipeline.create()', { shDeg, compressed });
     return self;
   }
 
@@ -220,6 +243,7 @@ class PreprocessPipeline {
     sortPreBG: GPUBindGroup,
     settingsBG: GPUBindGroup
   ): void {
+    rlog('PreprocessPipeline.run()', { numPoints: pc.numPoints() });
     const pass = encoder.beginComputePass({ label: 'preprocess compute pass' });
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, cameraBG);             // group(0)
@@ -255,6 +279,7 @@ export class Display {
     this.bindGroup = bindGroup;
     this.envBg = envBg;
     this.hasEnvMap = false;
+    rlog('Display.ctor()', { format });
   }
 
   static envMapBindGroupLayout(device: GPUDevice): GPUBindGroupLayout {
@@ -321,6 +346,7 @@ export class Display {
         { binding: 1, resource: sampler }
       ]
     });
+    rlog('Display.createRenderTarget()', { width, height, format });
     return [textureView, bindGroup];
   }
 
@@ -365,6 +391,7 @@ export class Display {
     const envBg = Display.createEnvMapBg(device, null);
     const [view, bindGroup] = Display.createRenderTarget(device, sourceFormat, width, height);
 
+    rlog('Display.create()', { sourceFormat, targetFormat, width, height });
     return new Display(pipeline, sourceFormat, view, bindGroup, envBg);
   }
 
@@ -375,6 +402,7 @@ export class Display {
   setEnvMap(device: GPUDevice, envTexture: GPUTextureView | null): void {
     this.envBg = Display.createEnvMapBg(device, envTexture);
     this.hasEnvMap = envTexture !== null;
+    rlog('Display.setEnvMap()', { hasEnvMap: this.hasEnvMap });
   }
 
   hasEnvMapSet(): boolean {
@@ -382,6 +410,7 @@ export class Display {
   }
 
   resize(device: GPUDevice, width: number, height: number): void {
+    rlog('Display.resize()', { width, height });
     const [view, bindGroup] = Display.createRenderTarget(device, this.format, width, height);
     this.bindGroup = bindGroup;
     this.view = view;
@@ -394,6 +423,7 @@ export class Display {
     camera: GPUBindGroup,
     renderSettings: GPUBindGroup
   ): void {
+    rlog('Display.render()');
     const pass = encoder.beginRenderPass({
       label: 'render pass',
       colorAttachments: [{ view: target, clearValue: backgroundColor, loadOp: 'clear', storeOp: 'store' }]
@@ -469,26 +499,9 @@ export class GaussianRenderer {
     this._indirectInitDV.setUint32(4, 0, true);
     this._indirectInitDV.setUint32(8, 0, true);
     this._indirectInitDV.setUint32(12, 0, true);
+
+    rlog('GaussianRenderer.ctor()', { colorFormat });
   }
-
-  // NOTE: heavy GPU readback; do NOT call per frame.
-  /*async getVisibleInstanceCount(device: GPUDevice): Promise<number> {
-    const staging = device.createBuffer({
-      label: 'readback indirect',
-      size: 16,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
-
-    const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(this.drawIndirectBuffer, 0, staging, 0, 16);
-    device.queue.submit([enc.finish()]);
-
-    await staging.mapAsync(GPUMapMode.READ);
-    const dv = new DataView(staging.getMappedRange());
-    const instanceCount = dv.getUint32(4, true);
-    staging.unmap();
-    return instanceCount;
-  }*/
 
   public camera(): UniformBuffer<ArrayBufferView> { return this.cameraUB; }
   public render_settings(): UniformBuffer<ArrayBufferView> { return this.settingsUB; }
@@ -554,6 +567,7 @@ export class GaussianRenderer {
     const cameraUB   = UniformBuffer.newDefault(device, 'camera uniform buffer', 272);
     const settingsUB = UniformBuffer.newDefault(device, 'render settings uniform buffer', 80);
 
+    rlog('GaussianRenderer.create()', { colorFormat, shDeg, compressed });
     return new GaussianRenderer(
       pipeline,
       cameraUB,
@@ -578,6 +592,10 @@ export class GaussianRenderer {
     this._camF32.set(camera.projInvMatrix as Float32Array, 48);          // [48..64)
     this._camF32[64] = camera.viewport[0]; this._camF32[65] = camera.viewport[1];
     this._camF32[66] = camera.focal[0];    this._camF32[67] = camera.focal[1];
+    rlog('serializeCameraUniform()', {
+      viewport: [this._camF32[64], this._camF32[65]],
+      focal: [this._camF32[66], this._camF32[67]]
+    });
     return new Uint8Array(this._camBuf);
   }
 
@@ -594,12 +612,22 @@ export class GaussianRenderer {
     dv.setFloat32(off, u.sceneExtend,true); off += 4;
     dv.setUint32 (off, 0,            true); off += 4; // _pad
     for (let i = 0; i < 4; i++) dv.setFloat32(off + i * 4, u.sceneCenter[i] ?? 0, true);
+    rlog('serializeSettingsUniform()', {
+      gaussianScaling: u.gaussianScaling,
+      maxShDeg: u.maxShDeg,
+      showEnvMap: !!u.showEnvMap,
+      mipSplatting: !!u.mipSplatting,
+      kernelSize: u.kernelSize,
+      walltime: u.walltime,
+      sceneExtend: u.sceneExtend
+    });
     return new Uint8Array(this._setBuf);
   }
 
   private writeInitialDrawIndirect(queue: GPUQueue): void {
     // vertex_count=4, instance_count=0, first_vertex=0, first_instance=0
     queue.writeBuffer(this.drawIndirectBuffer, 0, this._indirectInitBuf);
+    rlog('writeInitialDrawIndirect() -> (4,0,0,0)');
   }
 
   /* ---------- public API ---------- */
@@ -629,12 +657,7 @@ export class GaussianRenderer {
     const cu = this._cu;
     cu.setCamera(renderSettings.camera);
     cu.setViewport(renderSettings.viewport);
-
-    // focal = camera.projection.focal(viewport)
-    const fx = renderSettings.viewport[0] / (2.0 * Math.tan(renderSettings.camera.projection.fovx / 2.0));
-    const fy = renderSettings.viewport[1] / (2.0 * Math.tan(renderSettings.camera.projection.fovy / 2.0));
-    vec2.set(this._tmpVec2, fx, fy);
-    cu.setFocal(this._tmpVec2);
+    cu.setFocal(renderSettings.camera.projection.focal(renderSettings.viewport));
 
     const cameraBytes = this.serializeCameraUniform(cu);
 
@@ -647,6 +670,10 @@ export class GaussianRenderer {
     this.cameraUB.sync(queue);
     this.settingsUB.setData(settingsBytes);
     this.settingsUB.sync(queue);
+    rlog('preprocessStep() -> uploaded uniforms', {
+      viewport: Array.from(renderSettings.viewport),
+      resolution: Array.from(renderSettings.resolution)
+    });
 
     // Initialize indirect args like Rust (instance_count = 0 now)
     this.writeInitialDrawIndirect(queue);
@@ -664,7 +691,7 @@ export class GaussianRenderer {
   ): void {
     // Recreate sorter buffers if point count changed
     if (!this.sorterStuff || this.sorterStuff.numPoints !== pc.numPoints()) {
-      console.debug(`created sort buffers for ${pc.numPoints()} points`);
+      rlog('sorter.createSortStuff()', { prev: this.sorterStuff?.numPoints, next: pc.numPoints() });
       this.sorterStuff = this.sorter.createSortStuff(device, pc.numPoints());
     }
 
@@ -674,6 +701,7 @@ export class GaussianRenderer {
       this.sorterStuff.sorterUni,
       queue
     );
+    rlog('recordResetIndirectBuffer()');
 
     // Preprocess: 3D -> 2D splats
     if (stopwatch) stopwatch.start(encoder, 'preprocess');
@@ -695,6 +723,7 @@ export class GaussianRenderer {
       encoder
     );
     if (stopwatch) stopwatch.stop(encoder, 'sorting');
+    rlog('recordSortIndirect()');
 
     // Copy visible instance count from sorter_uni -> draw_indirect_buffer.instance_count (offset 4)
     encoder.copyBufferToBuffer(
@@ -704,9 +733,11 @@ export class GaussianRenderer {
       4,
       4
     );
+    rlog('copyBufferToBuffer(instance_count)');
   }
 
   render(renderPass: GPURenderPassEncoder, pc: PointCloud): void {
+    rlog('GaussianRenderer.render()');
     renderPass.setBindGroup(0, pc.getRenderBindGroup());     // points_2d (binding 2)
     renderPass.setBindGroup(1, this.sorterStuff!.sorterRenderBg);
     renderPass.setPipeline(this.pipeline);

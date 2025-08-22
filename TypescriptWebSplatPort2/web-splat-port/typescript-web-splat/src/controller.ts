@@ -2,6 +2,10 @@
 import { vec2, vec3, mat3, quat } from 'gl-matrix';
 import { PerspectiveCamera } from './camera.js';
 
+/** Toggle to log input + updates without changing behavior. */
+export const DEBUG_INPUT = false;
+const dlog = (...args: any[]) => { if (DEBUG_INPUT) console.debug('[controller]', ...args); };
+
 /** Minimal KeyCode union to mirror the Rust winit::keyboard::KeyCode variants used */
 export type KeyCode =
   | 'KeyW' | 'KeyS' | 'KeyA' | 'KeyD'
@@ -90,6 +94,7 @@ export class CameraController {
     }
 
     this.user_inptut = processed;
+    if (processed) dlog('process_keyboard', key, { pressed, amount: this.amount, rotation: this.rotation });
     return processed;
   }
 
@@ -99,17 +104,20 @@ export class CameraController {
       this.rotation[0] += mouse_dx;
       this.rotation[1] += mouse_dy;
       this.user_inptut = true;
+      dlog('process_mouse rotate', { dx: mouse_dx, dy: mouse_dy, rotation: this.rotation });
     }
     if (this.right_mouse_pressed) {
       this.shift[1] += -mouse_dx;
       this.shift[0] += mouse_dy;
       this.user_inptut = true;
+      dlog('process_mouse pan', { dx: mouse_dx, dy: mouse_dy, shift: this.shift });
     }
   }
 
   process_scroll(dy: number): void {
     this.scroll += -dy;
     this.user_inptut = true;
+    dlog('process_scroll', { dy, scroll: this.scroll });
   }
 
   /** Align controller to the camera’s current line of sight and adjust up. */
@@ -128,6 +136,7 @@ export class CameraController {
       const newUp = vec3.normalize(vec3.create(), vec3.subtract(vec3.create(), this.up, proj));
       this.up = newUp;
     }
+    dlog('reset_to_camera', { center: this.center, up: this.up });
   }
 
   /**
@@ -137,63 +146,57 @@ export class CameraController {
   update_camera(camera: PerspectiveCamera, dt_seconds: number): void {
     const dt = dt_seconds;
 
-    // dir from center to camera
+    // --- orbit baseline ---
     const dir = vec3.subtract(vec3.create(), camera.position, this.center);
     const distance = Math.max(1e-12, vec3.length(dir));
-
-    // dir = normalize(dir) * exp( ln(distance) + scroll * dt * 10 * speed )
     const newDist = Math.exp(Math.log(distance) + this.scroll * dt * 10.0 * this.speed);
     const dirNorm = vec3.scale(vec3.create(), vec3.normalize(vec3.create(), dir), newDist);
 
-    // Basis from inverse view rotation
-    const invQ = quat.invert(quat.create(), camera.rotation);
-    const x_axis = vec3.transformQuat(vec3.create(), vec3.fromValues(1, 0, 0), invQ);
-    const y_axis = this.up
-      ? vec3.clone(this.up)
-      : vec3.transformQuat(vec3.create(), vec3.fromValues(0, 1, 0), invQ);
-    const z_axis = vec3.transformQuat(vec3.create(), vec3.fromValues(0, 0, 1), invQ);
+    // --- fixed up (no-roll). allow custom up if user set it; otherwise world-up ---
+    const worldUp = this.up ? normalizeSafe(this.up) : vec3.fromValues(0, 1, 0);
 
-    // Pan (shift)
+    // --- pan (unchanged) ---
+    const invQ = quat.invert(quat.create(), camera.rotation);
+    const x_axis_cam = vec3.transformQuat(vec3.create(), vec3.fromValues(1, 0, 0), invQ);
+    const y_axis_cam = this.up ? vec3.clone(this.up) : vec3.transformQuat(vec3.create(), vec3.fromValues(0, 1, 0), invQ);
+
     const panScale = dt * this.speed * 0.1 * distance;
     const pan = vec3.create();
-    const sx = vec3.scale(vec3.create(), x_axis, this.shift[1] * panScale);
-    const sy = vec3.scale(vec3.create(), y_axis, -this.shift[0] * panScale);
+    const sx = vec3.scale(vec3.create(), x_axis_cam, this.shift[1] * panScale);
+    const sy = vec3.scale(vec3.create(), y_axis_cam, -this.shift[0] * panScale);
     vec3.add(pan, sx, sy);
     vec3.add(this.center, this.center, pan);
     vec3.add(camera.position, camera.position, pan);
 
-    // Rotations: theta around y_axis, phi around x_axis, eta around z_axis (ALT mode)
-    let theta = (this.rotation[0]) * dt * this.sensitivity;
-    let phi = (-this.rotation[1]) * dt * this.sensitivity;
-    let eta = 0.0;
+    // --- orbit: yaw about worldUp, pitch about "right" from (worldUp x viewDir) ---
+    const yaw   = (this.rotation[0]) * dt * this.sensitivity;   // mouse X
+    const pitch = (this.rotation[1]) * dt * this.sensitivity;   // mouse Y (inverted to feel natural)
 
-    if (this.alt_pressed) {
-      eta = -this.rotation[1] * dt * this.sensitivity;
-      theta = 0.0;
-      phi = 0.0;
+    // right axis from current viewing direction (dirNorm points center->cam)
+    let right = vec3.cross(vec3.create(), worldUp, dirNorm);
+    right = normalizeSafe(right);
+    if (vec3.length(right) < 1e-6) {
+      // looking straight up/down; pick a stable right
+      right = vec3.fromValues(1, 0, 0);
     }
 
-    const qTheta = quat.setAxisAngle(quat.create(), normalizeSafe(y_axis), theta);
-    const qPhi = quat.setAxisAngle(quat.create(), normalizeSafe(x_axis), phi);
-    const qEta = quat.setAxisAngle(quat.create(), normalizeSafe(z_axis), eta);
+    const qYaw   = quat.setAxisAngle(quat.create(), worldUp, yaw);
+    const qPitch = quat.setAxisAngle(quat.create(), right,  pitch);
+    // IMPORTANT: no roll (eta) at all.
+    const rot = quat.multiply(quat.create(), qYaw, qPitch);
 
-    // rot = rot_theta * rot_phi * rot_eta
-    const rot = quat.multiply(quat.create(), quat.multiply(quat.create(), qTheta, qPhi), qEta);
-
-    // new_dir = rot * dirNorm
     const new_dir = vec3.transformQuat(vec3.create(), dirNorm, rot);
 
     // avoid near-up singularity
-    if (angle_short(y_axis, new_dir) < 0.1) {
-      // keep original dir if too close
+    if (angle_short(worldUp, new_dir) < 0.1) {
       vec3.copy(new_dir, dirNorm);
     }
 
-    // position and orientation
+    // position and orientation (look along -new_dir with fixed up = worldUp)
     vec3.add(camera.position, this.center, new_dir);
-    camera.rotation = lookRotation(vec3.scale(vec3.create(), new_dir, -1), y_axis); // look along -new_dir with up=y_axis
+    camera.rotation = lookRotation(vec3.scale(vec3.create(), new_dir, -1), worldUp);
 
-    // Exponential decay based on FPS ~60
+    // --- damping (unchanged) ---
     let decay = Math.pow(0.8, dt * 60.0);
     if (decay < 1e-4) decay = 0.0;
 
@@ -207,6 +210,7 @@ export class CameraController {
     if (Math.abs(this.scroll) < 1e-4) this.scroll = 0.0;
 
     this.user_inptut = false;
+    dlog('update_camera (orbit, no-roll)', { dt, yaw, pitch, center: this.center, camPos: camera.position });
   }
 }
 

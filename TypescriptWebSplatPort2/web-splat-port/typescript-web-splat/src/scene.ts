@@ -133,8 +133,12 @@ export class SceneCamera {
     quat.normalize(q, q);
 
     const pos = vec3.fromValues(this.position[0], this.position[1], this.position[2]);
-    const proj = new PerspectiveProjection(fovx, fovy, 0.01, 100.0);
-
+    const proj = PerspectiveProjection.new(
+      vec2.fromValues(this.width, this.height),
+      vec2.fromValues(fovx, fovy),
+      0.01,
+      100.0
+    );
     return new PerspectiveCamera(pos, q, proj);
   }
 

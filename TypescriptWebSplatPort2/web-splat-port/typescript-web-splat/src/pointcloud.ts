@@ -3,6 +3,11 @@
 
 import { UniformBuffer } from './uniform';
 
+// ---- logging helper ----
+function pclog(...args: any[]) {
+  console.log('[pointcloud]', ...args);
+}
+
 // ---- Types mirroring the Rust structs (for clarity; buffers are passed as bytes) ----
 export type Vec3 = { x: number; y: number; z: number };
 export type Color3 = [number, number, number];
@@ -201,6 +206,7 @@ function getLayouts(device: GPUDevice): LayoutCache {
 
   l = { plain, compressed, render };
   LAYOUTS.set(device, l);
+  pclog('getLayouts(): created new layouts');
   return l;
 }
 
@@ -244,11 +250,14 @@ export class PointCloud {
     this._gaussianSrc = gaussBytes;
     this._shSrc = shBytes;
 
-    // 2D splats buffer (written by preprocess, read by vertex shader)
     this.splat_2d_buffer = device.createBuffer({
       label: '2d gaussians buffer',
       size: (pc.num_points >>> 0) * BYTES_PER_SPLAT,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE
+    });
+    pclog('ctor: created splat_2d_buffer', {
+      bytes: (pc.num_points >>> 0) * BYTES_PER_SPLAT,
+      num_points: pc.num_points
     });
 
     // Render bind group (only points_2d at binding=2)
@@ -258,6 +267,7 @@ export class PointCloud {
       layout: render,
       entries: [{ binding: 2, resource: { buffer: this.splat_2d_buffer } }]
     });
+    pclog('ctor: created render bind group');
 
     // GPU buffers for 3D gaussians + SH coefs (upload without mapping)
     this.vertex_buffer = device.createBuffer({
@@ -266,6 +276,7 @@ export class PointCloud {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
     device.queue.writeBuffer(this.vertex_buffer, 0, gaussBytes);
+    pclog('ctor: uploaded vertex_buffer', { bytes: gaussBytes.byteLength });
 
     this.sh_buffer = device.createBuffer({
       label: 'sh coefs buffer',
@@ -273,6 +284,7 @@ export class PointCloud {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
     device.queue.writeBuffer(this.sh_buffer, 0, shBytes);
+    pclog('ctor: uploaded sh_buffer', { bytes: shBytes.byteLength });
 
     // Build the preprocess bind group (compressed or not)
     const entries: GPUBindGroupEntry[] = [
@@ -301,12 +313,14 @@ export class PointCloud {
         layout: compressed,
         entries
       });
+      pclog('ctor: created preprocess bind group (compressed)');
     } else {
       this._bind_group = device.createBindGroup({
         label: 'point cloud bind group',
         layout: plain,
         entries
       });
+      pclog('ctor: created preprocess bind group (plain)');
     }
 
     // mirror Rust fields
@@ -321,6 +335,17 @@ export class PointCloud {
     this.background_color_ = pc.background_color
       ? { r: pc.background_color[0], g: pc.background_color[1], b: pc.background_color[2], a: 1.0 }
       : undefined;
+
+    pclog('ctor: initialized fields', {
+      num_points: this.num_points_,
+      sh_deg: this.sh_deg_,
+      compressed: this.compressed_,
+      bbox: this.bbox_,
+      center: this.center_,
+      mip_splatting: this.mip_splatting_,
+      kernel_size: this.kernel_size_,
+      background_color: this.background_color_
+    });
   }
 
   // --- DEBUG: log first Gaussian & SH buffer sanity info
@@ -357,7 +382,10 @@ export class PointCloud {
   // ---- getters matching Rust API ----
   compressed(): boolean { return this.compressed_; }
   num_points(): number { return this.num_points_; }       // exact Rust name
-  numPoints(): number { return this.num_points_; }        // TS convenience
+  numPoints(): number {
+    // hot path used by renderer/preprocess
+    return this.num_points_;
+  }
   sh_deg(): number { return this.sh_deg_; }               // exact Rust name
   shDeg(): number { return this.sh_deg_; }                // TS convenience
   bbox(): Aabb { return this.bbox_; }
