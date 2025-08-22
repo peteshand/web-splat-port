@@ -5,8 +5,6 @@ import { PointCloud } from './pointcloud';
 import { UniformBuffer } from './uniform';
 import { GPUStopwatch } from './utils';
 
-// NOTE: This matches the Rust gpu_rs API names used in renderer.rs.
-// Your TS port of gpu_rs should export these with matching signatures.
 import {
   GPURSSorter,
   PointCloudSortStuff
@@ -98,7 +96,7 @@ export class SplattingArgsUniform {
   public sceneCenter: vec4;
 
   constructor() {
-    this.gaussianScaling = 1.0;
+    this.gaussianScaling = 0.6;
     this.maxShDeg = 3;
     this.showEnvMap = 1;
     this.mipSplatting = 0;
@@ -193,7 +191,6 @@ class PreprocessPipeline {
     const wgslPath = compressed ? './shaders/preprocess_compressed.wgsl' : './shaders/preprocess.wgsl';
     const src = await (await fetch(wgslPath)).text();
     const code = `const MAX_SH_DEG : u32 = ${shDeg}u;\n${src}`;
-    
 
     const module = device.createShaderModule({ label: 'preprocess shader', code });
 
@@ -431,6 +428,19 @@ export class GaussianRenderer {
   private renderSorterLayout: GPUBindGroupLayout;
   private sortPreLayout: GPUBindGroupLayout;
 
+  // ===== PERF: reuse allocations (no API changes) =====
+  private _cu = new CameraUniform();
+  private _tmpVec2 = vec2.create();
+
+  private _camBuf = new ArrayBuffer(272);
+  private _camF32 = new Float32Array(this._camBuf);
+
+  private _setBuf = new ArrayBuffer(80);
+  private _setDV  = new DataView(this._setBuf);
+
+  private _indirectInitBuf = new ArrayBuffer(16);
+  private _indirectInitDV  = new DataView(this._indirectInitBuf);
+
   private constructor(
     pipeline: GPURenderPipeline,
     cameraUB: UniformBuffer<ArrayBufferView>,
@@ -453,29 +463,32 @@ export class GaussianRenderer {
     this.sorter = sorter;
     this.renderSorterLayout = renderSorterLayout;
     this.sortPreLayout = sortPreLayout;
+
+    // preset indirect init contents (vertex_count=4, others=0)
+    this._indirectInitDV.setUint32(0, 4, true);
+    this._indirectInitDV.setUint32(4, 0, true);
+    this._indirectInitDV.setUint32(8, 0, true);
+    this._indirectInitDV.setUint32(12, 0, true);
   }
 
-  async getVisibleInstanceCount(device: GPUDevice): Promise<number> {
-    // staging buffer for readback
+  // NOTE: heavy GPU readback; do NOT call per frame.
+  /*async getVisibleInstanceCount(device: GPUDevice): Promise<number> {
     const staging = device.createBuffer({
       label: 'readback indirect',
       size: 16,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
     });
-  
+
     const enc = device.createCommandEncoder();
     enc.copyBufferToBuffer(this.drawIndirectBuffer, 0, staging, 0, 16);
     device.queue.submit([enc.finish()]);
-  
+
     await staging.mapAsync(GPUMapMode.READ);
     const dv = new DataView(staging.getMappedRange());
-    const vertexCount   = dv.getUint32(0, true);
     const instanceCount = dv.getUint32(4, true);
     staging.unmap();
-  
-    console.log('[indirect] vertexCount:', vertexCount, 'instanceCount:', instanceCount);
     return instanceCount;
-  }
+  }*/
 
   public camera(): UniformBuffer<ArrayBufferView> { return this.cameraUB; }
   public render_settings(): UniformBuffer<ArrayBufferView> { return this.settingsUB; }
@@ -538,7 +551,7 @@ export class GaussianRenderer {
     const preprocess = await PreprocessPipeline.create(device, shDeg, compressed, sortPreLayout);
 
     // Two separate uniform buffers (1:1 with Rust)
-    const cameraUB = UniformBuffer.newDefault(device, 'camera uniform buffer', 272);
+    const cameraUB   = UniformBuffer.newDefault(device, 'camera uniform buffer', 272);
     const settingsUB = UniformBuffer.newDefault(device, 'render settings uniform buffer', 80);
 
     return new GaussianRenderer(
@@ -558,64 +571,35 @@ export class GaussianRenderer {
   /* ---------- helpers (serialization mirrors Rust struct layout) ---------- */
 
   private serializeCameraUniform(camera: CameraUniform): Uint8Array {
-    const buf = new ArrayBuffer(272); // 4 * mat4 (64 floats) + 2*vec2 (4 floats) = 68 floats * 4
-    const f32 = new Float32Array(buf);
-
-    f32.set(camera.viewMatrix as Float32Array, 0);              // [0..16)
-    f32.set(camera.viewInvMatrix as Float32Array, 16);          // [16..32)
-    f32.set(camera.projMatrix as Float32Array, 32);             // [32..48)
-    f32.set(camera.projInvMatrix as Float32Array, 48);          // [48..64)
-    f32[64] = camera.viewport[0]; f32[65] = camera.viewport[1]; // [64..66)
-    f32[66] = camera.focal[0];    f32[67] = camera.focal[1];    // [66..68)
-
-    return new Uint8Array(buf);
+    // 4 * mat4 (64 floats) + 2*vec2 (4 floats) = 68 floats
+    this._camF32.set(camera.viewMatrix as Float32Array, 0);              // [0..16)
+    this._camF32.set(camera.viewInvMatrix as Float32Array, 16);          // [16..32)
+    this._camF32.set(camera.projMatrix as Float32Array, 32);             // [32..48)
+    this._camF32.set(camera.projInvMatrix as Float32Array, 48);          // [48..64)
+    this._camF32[64] = camera.viewport[0]; this._camF32[65] = camera.viewport[1];
+    this._camF32[66] = camera.focal[0];    this._camF32[67] = camera.focal[1];
+    return new Uint8Array(this._camBuf);
   }
 
   private serializeSettingsUniform(u: SplattingArgsUniform): Uint8Array {
-    const buf = new ArrayBuffer(80);
-    const dv = new DataView(buf);
-    let off = 0;
-
-    // clipping_box_min (vec4)
-    for (let i = 0; i < 4; i++) dv.setFloat32(off + i * 4, u.clippingBoxMin[i], true);
-    off += 16;
-
-    // clipping_box_max (vec4)
-    for (let i = 0; i < 4; i++) dv.setFloat32(off + i * 4, u.clippingBoxMax[i], true);
-    off += 16;
-
-    // gaussian_scaling f32
+    const dv = this._setDV; let off = 0;
+    for (let i = 0; i < 4; i++) dv.setFloat32(off + i * 4, u.clippingBoxMin[i], true); off += 16;
+    for (let i = 0; i < 4; i++) dv.setFloat32(off + i * 4, u.clippingBoxMax[i], true); off += 16;
     dv.setFloat32(off, u.gaussianScaling, true); off += 4;
-    // max_sh_deg u32
-    dv.setUint32(off, (u.maxShDeg >>> 0), true); off += 4;
-    // show_env_map u32
-    dv.setUint32(off, (u.showEnvMap >>> 0), true); off += 4;
-    // mip_splatting u32
-    dv.setUint32(off, (u.mipSplatting >>> 0), true); off += 4;
-
-    // kernel_size, walltime, scene_extend
+    dv.setUint32 (off, (u.maxShDeg     >>> 0), true); off += 4;
+    dv.setUint32 (off, (u.showEnvMap   >>> 0), true); off += 4;
+    dv.setUint32 (off, (u.mipSplatting >>> 0), true); off += 4;
     dv.setFloat32(off, u.kernelSize, true); off += 4;
-    dv.setFloat32(off, u.walltime, true); off += 4;
-    dv.setFloat32(off, u.sceneExtend, true); off += 4;
-
-    // _pad u32
-    dv.setUint32(off, 0, true); off += 4;
-
-    // scene_center vec4
+    dv.setFloat32(off, u.walltime,   true); off += 4;
+    dv.setFloat32(off, u.sceneExtend,true); off += 4;
+    dv.setUint32 (off, 0,            true); off += 4; // _pad
     for (let i = 0; i < 4; i++) dv.setFloat32(off + i * 4, u.sceneCenter[i] ?? 0, true);
-
-    return new Uint8Array(buf);
+    return new Uint8Array(this._setBuf);
   }
 
   private writeInitialDrawIndirect(queue: GPUQueue): void {
     // vertex_count=4, instance_count=0, first_vertex=0, first_instance=0
-    const arr = new ArrayBuffer(16);
-    const dv = new DataView(arr);
-    dv.setUint32(0, 4, true);
-    dv.setUint32(4, 0, true);
-    dv.setUint32(8, 0, true);
-    dv.setUint32(12, 0, true);
-    queue.writeBuffer(this.drawIndirectBuffer, 0, arr);
+    queue.writeBuffer(this.drawIndirectBuffer, 0, this._indirectInitBuf);
   }
 
   /* ---------- public API ---------- */
@@ -641,15 +625,16 @@ export class GaussianRenderer {
     pc: PointCloud,
     renderSettings: SplattingArgs
   ): [GPUBindGroup, GPUBindGroup] /* cameraBG, settingsBG */ {
-    // Camera uniform
-    const cu = new CameraUniform();
+    // Camera uniform (reuse)
+    const cu = this._cu;
     cu.setCamera(renderSettings.camera);
     cu.setViewport(renderSettings.viewport);
 
     // focal = camera.projection.focal(viewport)
-    const focalX = renderSettings.viewport[0] / (2.0 * Math.tan(renderSettings.camera.projection.fovx / 2.0));
-    const focalY = renderSettings.viewport[1] / (2.0 * Math.tan(renderSettings.camera.projection.fovy / 2.0));
-    cu.setFocal(vec2.fromValues(focalX, focalY));
+    const fx = renderSettings.viewport[0] / (2.0 * Math.tan(renderSettings.camera.projection.fovx / 2.0));
+    const fy = renderSettings.viewport[1] / (2.0 * Math.tan(renderSettings.camera.projection.fovy / 2.0));
+    vec2.set(this._tmpVec2, fx, fy);
+    cu.setFocal(this._tmpVec2);
 
     const cameraBytes = this.serializeCameraUniform(cu);
 
@@ -719,22 +704,6 @@ export class GaussianRenderer {
       4,
       4
     );
-
-    // === DEBUG: force instance_count = numPoints (wins over previous copy) ===
-    {
-        const tmp = device.createBuffer({
-            label: 'debug instance_count',
-            size: 4,
-            usage: GPUBufferUsage.COPY_SRC,
-        mappedAtCreation: true,
-    });
-    // write pc.numPoints() LE u32 into tmp
-    new DataView(tmp.getMappedRange()).setUint32(0, pc.numPoints() >>> 0, true);
-    tmp.unmap();
-
-    // overwrite just the instanceCount field at +4
-    encoder.copyBufferToBuffer(tmp, 0, this.drawIndirectBuffer, 4, 4);
-    }
   }
 
   render(renderPass: GPURenderPassEncoder, pc: PointCloud): void {
