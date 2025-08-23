@@ -208,7 +208,7 @@ export class WindowContext {
     state.splatting_args = {
       camera: view_camera,
       viewport: vec2.fromValues(size.width, size.height),
-      gaussianScaling: 1.0,
+      gaussianScaling: 0.02,
       maxShDeg: state.pc.shDeg(),
       showEnvMap: false,
       mipSplatting: undefined,

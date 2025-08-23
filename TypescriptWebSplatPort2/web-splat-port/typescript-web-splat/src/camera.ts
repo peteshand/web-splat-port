@@ -21,43 +21,44 @@ export const VIEWPORT_Y_FLIP: mat4 = mat4.fromValues(
 
 // ---- Helpers equivalent to Rust free functions ----
 export function world2view(r: mat3, t: vec3): mat4 {
-  // World matrix from rotation+translation, then invert (cgmath code does inverse().transpose()).
-  // gl-matrix uses column-major, so an inverse is the right equivalent here.
   const world = mat4.create();
-  // embed r (mat3) into mat4
+
+  // embed rotation (columns)
   world[0] = r[0]; world[1] = r[1]; world[2]  = r[2];
   world[4] = r[3]; world[5] = r[4]; world[6]  = r[5];
   world[8] = r[6]; world[9] = r[7]; world[10] = r[8];
-  world[12] = t[0]; world[13] = t[1]; world[14] = t[2];
-  world[15] = 1;
+
+  // last column is [0,0,0,1]
+  world[12] = 0; world[13] = 0; world[14] = 0; world[15] = 1;
+
+  // ⬅ translation in the *bottom row*, like cgmath does before transpose
+  world[3]  = t[0];
+  world[7]  = t[1];
+  world[11] = t[2];
+
   const view = mat4.create();
   mat4.invert(view, world);
-  clog('world2view()', { r: Array.from(r), t: Array.from(t) });
+  mat4.transpose(view, view); // inverse().transpose() — matches Rust
   return view;
 }
 
 export function build_proj(znear: number, zfar: number, fov_x: number, fov_y: number): mat4 {
-  // Mirrors camera.rs build_proj(), including its final transpose, in gl-matrix column-major.
   const tanHalfY = Math.tan(fov_y * 0.5);
   const tanHalfX = Math.tan(fov_x * 0.5);
 
-  const top = tanHalfY * znear;
-  const bottom = -top;
-  const right = tanHalfX * znear;
-  const left = -right;
+  const top = tanHalfY * znear, bottom = -top;
+  const right = tanHalfX * znear, left = -right;
 
   const m = mat4.create();
-  m[0]  = (2 * znear) / (right - left);     // m00
-  m[5]  = (2 * znear) / (top - bottom);     // m11
-  m[8]  = (right + left) / (right - left);  // m20
-  m[9]  = (top + bottom) / (top - bottom);  // m21
-  m[10] = zfar / (zfar - znear);            // m22
-  m[14] = -(zfar * znear) / (zfar - znear); // m23
-  m[11] = 1;                                // m32
-  m[15] = 0;                                // m33
-
-  clog('build_proj()', { znear, zfar, fov_x, fov_y });
-  return m;
+  m[0]  = (2 * znear) / (right - left);
+  m[5]  = (2 * znear) / (top - bottom);
+  m[8]  = (right + left) / (right - left);
+  m[9]  = (top + bottom) / (top - bottom);
+  m[10] = zfar / (zfar - znear);
+  m[14] = -(zfar * znear) / (zfar - znear);
+  m[11] = 1;
+  m[15] = 0;
+  return m;                // ← no transpose here
 }
 
 export function focal2fov(focal: number, pixels: number): number {
@@ -178,7 +179,7 @@ export class PerspectiveCamera implements Camera {
     clog('PerspectiveCamera.default()');
     return new PerspectiveCamera(
       vec3.fromValues(0, 0, -1),
-      quat.fromValues(1, 0, 0, 0),
+      quat.create(),
       new PerspectiveProjection(
         (45 * Math.PI) / 180,
         (45 * Math.PI) / 180,
@@ -205,12 +206,11 @@ export class PerspectiveCamera implements Camera {
 
   // ---- Camera trait methods (camelCase + 1:1 aliases) ----
   viewMatrix(): mat4 {
-    const w = mat4.create();
-    mat4.fromRotationTranslation(w, this.rotation, this.position);
-    const v = mat4.create();
-    mat4.invert(v, w);
-    clog('PerspectiveCamera.viewMatrix()');
-    return v;
+    const world = mat4.create();
+    mat4.fromRotationTranslation(world, this.rotation, this.position);
+    const view = mat4.create();
+    mat4.invert(view, world);
+    return view;
   }
   view_matrix(): mat4 { return this.viewMatrix(); }
 
