@@ -1,4 +1,5 @@
 // lib.ts — 1:1 surface port of lib.rs adapted to your TS APIs
+// Updated: exact Rust FOVs at init + two-phase init (800x600 → real size)
 
 import { vec2, vec3, quat } from 'gl-matrix';
 import { GaussianRenderer, SplattingArgs, Display } from './renderer';
@@ -167,17 +168,20 @@ export class WindowContext {
       state.pc.compressed()
     );
 
-    // ---- Initial camera (tuples, not {x,y,z}) ----
+    // ---- Initial camera (Rust parity for FOVs) ----
+    // Rust: PerspectiveProjection::new(viewport, (Deg(45), Deg(45 / aspect)), 0.01, 1000)
     const aabb = state.pc.bbox();
     const aspect = size.width / Math.max(1, size.height);
-    const c0 = state.pc.center();
+
+    const c0v = aabb.center();
+    const c0 = vec3.fromValues(c0v.x, c0v.y, c0v.z);
     const r = aabb.radius();
-    const eyeTuple: vec3 = vec3.fromValues(c0.x - r * 0.5, c0.y - r * 0.5, c0.z - r * 0.5);
+    const eyeTuple: vec3 = vec3.fromValues(c0[0] - r * 0.5, c0[1] - r * 0.5, c0[2] - r * 0.5);
     const rot: quat = quat.create();
 
-    // Match Rust: fov = (45°, 45°/aspect) in radians, and set fov2view_ratio via .new()
-    const fovx = (45 * Math.PI) / 180;
-    const fovy = ((45 / Math.max(1e-6, aspect)) * Math.PI) / 180;
+    const deg2rad = (d: number) => (d * Math.PI) / 180;
+    const fovx = deg2rad(45);
+    const fovy = deg2rad(45 / Math.max(1e-6, aspect));
 
     const proj = PerspectiveProjection.new(
       vec2.fromValues(size.width, size.height),
@@ -208,7 +212,7 @@ export class WindowContext {
     state.splatting_args = {
       camera: view_camera,
       viewport: vec2.fromValues(size.width, size.height),
-      gaussianScaling: 0.02,
+      gaussianScaling: 1.0,
       maxShDeg: state.pc.shDeg(),
       showEnvMap: false,
       mipSplatting: undefined,
@@ -450,6 +454,35 @@ export class WindowContext {
     this._changed = true;
   }
 
+  // NEW: parity helper to jump to a scene camera (no animation for simplicity)
+  private set_scene_camera(i: number): void {
+    if (!this.scene) return;
+    this.current_view = i;
+    const cam = this.scene.camera(i);
+    if (!cam) return;
+
+    // Try SceneCamera.toPerspective() first if available
+    const anyCam: any = cam as any;
+    if (typeof anyCam.toPerspective === 'function') {
+      const pc: PerspectiveCamera = anyCam.toPerspective();
+      this.update_camera(pc);
+      return;
+    }
+
+    // Otherwise, build a PerspectiveCamera from the SceneCamera fields
+    const pos = Array.isArray(cam.position)
+      ? vec3.fromValues(cam.position[0], cam.position[1], cam.position[2])
+      : v3(cam.position as any);
+    const rot = Array.isArray(cam.rotation)
+      ? quat.fromValues(cam.rotation[0], cam.rotation[1], cam.rotation[2], cam.rotation[3])
+      : (cam.rotation as any as quat);
+
+    // Reuse current projection (Rust also keeps projection except for resize)
+    const proj = this.splatting_args.camera.projection;
+    const pc = new PerspectiveCamera(pos, rot, proj);
+    this.update_camera(pc);
+  }
+
   private async set_env_map(_path: string): Promise<void> {
     // Stub — hook your EXR/HDR decode pipeline here if needed
     this.splatting_args.showEnvMap = true;
@@ -635,42 +668,49 @@ export async function open_window(
     (() => {
       const c = document.createElement('canvas');
       c.id = 'window-canvas';
-      // CSS size fills the viewport; backing store set below.
       c.style.width = '100%';
       c.style.height = '100%';
       document.body.appendChild(c);
       return c;
     })();
 
-  // Keep the canvas backing store equal to its CSS box (no DPR) — matches wasm Rust path.
-  const syncCanvasBackingStore = () => {
+  // Real backing store = CSS * DPR (what we *actually* want to render)
+  const backingFromCss = () => {
     const rect = canvas.getBoundingClientRect();
-    const w = Math.max(1, Math.floor(rect.width));
-    const h = Math.max(1, Math.floor(rect.height));
-    if (canvas.width !== w)  canvas.width  = w;
-    if (canvas.height !== h) canvas.height = h;
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      w: Math.max(1, Math.floor(rect.width  * dpr)),
+      h: Math.max(1, Math.floor(rect.height * dpr)),
+      dpr
+    };
   };
-  syncCanvasBackingStore();
+
+  // --- TWO-PHASE INIT to mimic Rust ---
+  // Phase 0: capture real size we’ll use *after* initialization.
+  const { w: realW, h: realH, dpr: realDpr } = backingFromCss();
+
+  // Phase 1: initialize at 800x600 like Rust does before the wasm canvas resize.
+  const initW = 800, initH = 600;
+  canvas.width = initW;
+  canvas.height = initH;
 
   const state = await WindowContext.new(canvas, file, config);
 
-  // Bind input in the same place the Rust app wires winit events to the controller.
   const _unbindInput = bind_input(canvas, (state as any)['controller'] as CameraController);
 
-  // Keep TS path 1:1 with Rust resize semantics: CSS px -> backing store -> engine resize.
-  const applySize = () => {
-    syncCanvasBackingStore();
-    state.resize(
-      { width: canvas.width, height: canvas.height },
-      window.devicePixelRatio || 1
-    );
+  // Phase 2: immediately resize to the real backing-store size
+  const applyRealSize = () => {
+    const now = backingFromCss();
+    if (canvas.width !== now.w)  canvas.width  = now.w;
+    if (canvas.height !== now.h) canvas.height = now.h;
+    state.resize({ width: now.w, height: now.h }, now.dpr);
   };
-  const ro = new ResizeObserver(applySize);
-  ro.observe(canvas);
+  applyRealSize();
 
-  // Fallback for viewport changes that don’t trigger element box changes
-  addEventListener('resize', applySize, { passive: true });
-  addEventListener('orientationchange', applySize, { passive: true });
+  const ro = new ResizeObserver(applyRealSize);
+  ro.observe(canvas);
+  addEventListener('resize', applyRealSize, { passive: true });
+  addEventListener('orientationchange', applyRealSize, { passive: true });
 
   (state as any).pointcloud_file_path = pointcloud_file_path;
 
@@ -678,6 +718,8 @@ export async function open_window(
     try {
       const s = await (Scene as any).fromJson(scene);
       (state as any)['set_scene'](s);
+      // NEW: switch to scene camera 0 like Rust
+      (state as any)['set_scene_camera']?.(0);
       (state as any).scene_file_path = scene_file_path;
     } catch (err) {
       console.error('cannot load scene:', err);
@@ -706,7 +748,6 @@ export async function open_window(
       (res as any)[0] !== (state as any)['config'].width ||
       (res as any)[1] !== (state as any)['config'].height;
 
-    // use internal change flag instead of JSON stringify
     const request_redraw = (state as any)._changed || resChange;
 
     if (request_redraw || redraw_ui) {

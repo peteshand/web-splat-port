@@ -4,10 +4,21 @@
 import { mat4, mat3, vec3, vec2, quat } from 'gl-matrix';
 import type { Aabb } from './pointcloud';
 
+/* ---------------- logging gate (matches renderer/uniform) ---------------- */
+declare global {
+  // eslint-disable-next-line no-var
+  var __LOGGING_ENABLED__: boolean | undefined;
+}
+function loggingEnabled(): boolean {
+  return (globalThis as any).__LOGGING_ENABLED__ ?? true;
+}
+export function setLoggingEnabled(enabled: boolean): void {
+  (globalThis as any).__LOGGING_ENABLED__ = !!enabled;
+}
+
 // ---- logging helper ----
 function clog(...args: any[]) {
-  // Prefixed so you can filter easily in DevTools
-  // (kept unconditional per your request for instrumentation)
+  if (!loggingEnabled()) return;
   console.log('[camera]', ...args);
 }
 
@@ -31,14 +42,14 @@ export function world2view(r: mat3, t: vec3): mat4 {
   // last column is [0,0,0,1]
   world[12] = 0; world[13] = 0; world[14] = 0; world[15] = 1;
 
-  // ⬅ translation in the *bottom row*, like cgmath does before transpose
+  // translation in the bottom row (matches what worked before)
   world[3]  = t[0];
   world[7]  = t[1];
   world[11] = t[2];
 
   const view = mat4.create();
   mat4.invert(view, world);
-  mat4.transpose(view, view); // inverse().transpose() — matches Rust
+  mat4.transpose(view, view);
   return view;
 }
 
@@ -50,15 +61,16 @@ export function build_proj(znear: number, zfar: number, fov_x: number, fov_y: nu
   const right = tanHalfX * znear, left = -right;
 
   const m = mat4.create();
+  // This matches Rust's build_proj() *after* its final transpose().
   m[0]  = (2 * znear) / (right - left);
   m[5]  = (2 * znear) / (top - bottom);
   m[8]  = (right + left) / (right - left);
   m[9]  = (top + bottom) / (top - bottom);
+  m[11] = 1;
   m[10] = zfar / (zfar - znear);
   m[14] = -(zfar * znear) / (zfar - znear);
-  m[11] = 1;
   m[15] = 0;
-  return m;                // ← no transpose here
+  return m;
 }
 
 export function focal2fov(focal: number, pixels: number): number {
@@ -73,7 +85,6 @@ export function fov2focal(fov: number, pixels: number): number {
   return out;
 }
 
-// ---- Interfaces / Types ----
 export interface FrustumPlanes {
   near: [number, number, number, number];
   far: [number, number, number, number];
@@ -86,23 +97,16 @@ export interface FrustumPlanes {
 export interface Camera {
   viewMatrix(): mat4;
   projMatrix(): mat4;
-  // 1:1 aliases (Rust-style names), kept for parity:
   view_matrix?(): mat4;
   proj_matrix?(): mat4;
-
-  // ❌ remove this — conflicts with the field on PerspectiveCamera
-  // position?(): vec3;
-
   frustum_planes?(): FrustumPlanes;
 }
 
-// ---- PerspectiveProjection ----
 export class PerspectiveProjection {
-  fovx: number;   // radians
-  fovy: number;   // radians
+  fovx: number;
+  fovy: number;
   znear: number;
   zfar: number;
-  /** fov ratio to viewport ratio (fov2view_ratio) */
   fov2view_ratio: number;
 
   constructor(fovx: number, fovy: number, znear: number, zfar: number, fov2view_ratio = 1) {
@@ -139,7 +143,6 @@ export class PerspectiveProjection {
     clog('PerspectiveProjection.resize()', { width, height, ratio, before: prev, after: { fovx: this.fovx, fovy: this.fovy }, fov2view_ratio: this.fov2view_ratio });
   }
 
-  /** Focal lengths in pixels for a given viewport */
   focal(viewport: vec2): vec2 {
     const fx = fov2focal(this.fovx, viewport[0]);
     const fy = fov2focal(this.fovy, viewport[1]);
@@ -162,10 +165,9 @@ export class PerspectiveProjection {
   }
 }
 
-// ---- PerspectiveCamera ----
 export class PerspectiveCamera implements Camera {
-  position: vec3;            // Point3<f32>
-  rotation: quat;            // Quaternion<f32>
+  position: vec3;
+  rotation: quat;
   projection: PerspectiveProjection;
 
   constructor(position: vec3, rotation: quat, projection: PerspectiveProjection) {
@@ -204,7 +206,7 @@ export class PerspectiveCamera implements Camera {
     this.projection.znear = znear;
   }
 
-  // ---- Camera trait methods (camelCase + 1:1 aliases) ----
+  // Match Rust: world2view(R, t) => inverse().transpose()
   viewMatrix(): mat4 {
     const world = mat4.create();
     mat4.fromRotationTranslation(world, this.rotation, this.position);
@@ -223,16 +225,12 @@ export class PerspectiveCamera implements Camera {
 
   positionVec(): vec3 { return vec3.clone(this.position); }
 
-  // ❌ remove this method; it collides with the field name
-  // position(): vec3 { return this.positionVec(); }
-
   frustum_planes(): FrustumPlanes {
     const p = this.projMatrix();
     const v = this.viewMatrix();
     const pv = mat4.create();
     mat4.multiply(pv, p, v);
 
-    // rows of pv (convert from column-major)
     const row = (r: number): [number, number, number, number] => [
       pv[0 + r], pv[4 + r], pv[8 + r], pv[12 + r]
     ];
@@ -262,7 +260,6 @@ export class PerspectiveCamera implements Camera {
     return { near, far, left, right, top, bottom };
   }
 
-  // SPLIT interpolation (Slerp for rotation, linear for others)
   lerp(other: PerspectiveCamera, amount: number): PerspectiveCamera {
     const outPos = vec3.create();
     vec3.lerp(outPos, this.position, other.position, amount);

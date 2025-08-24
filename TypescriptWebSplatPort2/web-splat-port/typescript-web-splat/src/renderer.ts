@@ -6,9 +6,20 @@ import { UniformBuffer } from './uniform';
 import { GPUStopwatch } from './utils';
 import { GPURSSorter, PointCloudSortStuff } from './gpu_rs';
 
+/* -------------------------- global logging gate -------------------------- */
+// Ensure a single, shared flag exists even if this module loads first/last.
+const __g = globalThis as any;
+if (typeof __g.__LOGGING_ENABLED__ === 'undefined') {
+  __g.__LOGGING_ENABLED__ = true;
+}
+function loggingEnabled(): boolean {
+  return !!(globalThis as any).__LOGGING_ENABLED__;
+}
+
 /* -------------------------- logging + helpers -------------------------- */
 
 function logi(tag: string, msg: string, extra?: any) {
+  if (!loggingEnabled()) return;
   if (extra !== undefined) {
     console.log(`${tag} ${msg}`, extra);
   } else {
@@ -27,7 +38,10 @@ function fmtF32Slice(a: ArrayLike<number>): string {
 function hashBytesU64(bytes: ArrayBufferView): string {
   let h = 0xcbf29ce484222325n;
   const prime = 0x100000001b3n;
-  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const u8 =
+    bytes instanceof Uint8Array
+      ? bytes
+      : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   for (let i = 0; i < u8.length; i++) {
     h ^= BigInt(u8[i]);
     h = (h * prime) & 0xffffffffffffffffn;
@@ -38,6 +52,43 @@ function hashBytesU64(bytes: ArrayBufferView): string {
 function mat4ColMajorToArray(m: mat4): Float32Array {
   // gl-matrix stores column-major in a Float32Array already
   return new Float32Array(m);
+}
+
+/* -------------------------- debug readback + dumps -------------------------- */
+
+const DEBUG_READBACK_EVERY_N_FRAMES = 1; // set to 0 to disable
+
+function u8ToU32LE(u8: Uint8Array): Uint32Array {
+  const n = Math.floor(u8.byteLength / 4);
+  return new Uint32Array(u8.buffer, u8.byteOffset, n);
+}
+function u8ToF32(u8: Uint8Array): Float32Array {
+  const n = Math.floor(u8.byteLength / 4);
+  return new Float32Array(u8.buffer, u8.byteOffset, n);
+}
+function dumpU32(label: string, u8: Uint8Array) {
+  if (!loggingEnabled()) return;
+  const u32 = u8ToU32LE(u8);
+  console.log(label, Array.from(u32));
+}
+
+async function readbackBuffer(
+  device: GPUDevice,
+  src: GPUBuffer,
+  size: number
+): Promise<ArrayBuffer> {
+  // copy into a MAP_READ buffer and submit immediately
+  const rb = device.createBuffer({
+    size: (size + 255) & ~255, // 256 alignment
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+  });
+  const enc = device.createCommandEncoder({ label: 'rb-encoder' });
+  enc.copyBufferToBuffer(src, 0, rb, 0, size);
+  device.queue.submit([enc.finish()]);
+  await rb.mapAsync(GPUMapMode.READ);
+  const slice = rb.getMappedRange().slice(0, size);
+  rb.unmap();
+  return slice;
 }
 
 /* ========================= CameraUniform ========================= */
@@ -213,16 +264,31 @@ class PreprocessPipeline {
       : PointCloud.bind_group_layout(device);
     const settingsLayout = UniformBuffer.bind_group_layout(device); // group(3)
 
-    const self = new PreprocessPipeline(cameraLayout, pcLayout, sortPreLayout, settingsLayout);
+    const self = new PreprocessPipeline(
+      cameraLayout,
+      pcLayout,
+      sortPreLayout,
+      settingsLayout
+    );
 
-    const wgslPath = compressed ? './shaders/preprocess_compressed.wgsl' : './shaders/preprocess.wgsl';
+    const wgslPath = compressed
+      ? './shaders/preprocess_compressed.wgsl'
+      : './shaders/preprocess.wgsl';
     const src = await (await fetch(wgslPath)).text();
     const code = `const MAX_SH_DEG : u32 = ${shDeg}u;\n${src}`;
-    const module = device.createShaderModule({ label: 'preprocess shader', code });
+    const module = device.createShaderModule({
+      label: 'preprocess shader',
+      code
+    });
 
     const pipelineLayout = device.createPipelineLayout({
       label: 'preprocess pipeline layout',
-      bindGroupLayouts: [self.cameraLayout, self.pcLayout, self.sortPreLayout, self.settingsLayout]
+      bindGroupLayouts: [
+        self.cameraLayout,
+        self.pcLayout,
+        self.sortPreLayout,
+        self.settingsLayout
+      ]
     });
 
     self.pipeline = device.createComputePipeline({
@@ -284,8 +350,16 @@ export class Display {
     return device.createBindGroupLayout({
       label: 'env map bind group layout',
       entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'float', viewDimension: '2d' }
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: 'filtering' }
+        }
       ]
     });
   }
@@ -294,13 +368,24 @@ export class Display {
     return device.createBindGroupLayout({
       label: 'display bind group layout',
       entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'float', viewDimension: '2d' }
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: 'filtering' }
+        }
       ]
     });
   }
 
-  static createEnvMapBg(device: GPUDevice, envTexture: GPUTextureView | null): GPUBindGroup {
+  static createEnvMapBg(
+    device: GPUDevice,
+    envTexture: GPUTextureView | null
+  ): GPUBindGroup {
     const placeholderTexture = device
       .createTexture({
         label: 'placeholder',
@@ -310,7 +395,11 @@ export class Display {
       })
       .createView();
     const textureView = envTexture ?? placeholderTexture;
-    const sampler = device.createSampler({ label: 'env map sampler', magFilter: 'linear', minFilter: 'linear' });
+    const sampler = device.createSampler({
+      label: 'env map sampler',
+      magFilter: 'linear',
+      minFilter: 'linear'
+    });
     return device.createBindGroup({
       label: 'env map bind group',
       layout: Display.envMapBindGroupLayout(device),
@@ -331,7 +420,8 @@ export class Display {
       label: 'display render image',
       size: { width, height },
       format,
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
     });
     const textureView = texture.createView();
     const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
@@ -364,7 +454,10 @@ export class Display {
     });
 
     const displaySrc = await (await fetch('./shaders/display.wgsl')).text();
-    const module = device.createShaderModule({ label: 'display shader', code: displaySrc });
+    const module = device.createShaderModule({
+      label: 'display shader',
+      code: displaySrc
+    });
 
     const pipeline = device.createRenderPipeline({
       label: 'display pipeline',
@@ -377,8 +470,16 @@ export class Display {
           {
             format: targetFormat,
             blend: {
-              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+              color: {
+                srcFactor: 'one',
+                dstFactor: 'one-minus-src-alpha',
+                operation: 'add'
+              },
+              alpha: {
+                srcFactor: 'one',
+                dstFactor: 'one-minus-src-alpha',
+                operation: 'add'
+              }
             },
             writeMask: GPUColorWrite.ALL
           }
@@ -388,7 +489,12 @@ export class Display {
     });
 
     const envBg = Display.createEnvMapBg(device, null);
-    const [view, bindGroup] = Display.createRenderTarget(device, sourceFormat, width, height);
+    const [view, bindGroup] = Display.createRenderTarget(
+      device,
+      sourceFormat,
+      width,
+      height
+    );
     logi('[display::new]', `render_target ${width}x${height} format=${sourceFormat}`);
     return new Display(pipeline, sourceFormat, view, bindGroup, envBg);
   }
@@ -408,7 +514,12 @@ export class Display {
   }
 
   resize(device: GPUDevice, width: number, height: number): void {
-    const [view, bindGroup] = Display.createRenderTarget(device, this.format, width, height);
+    const [view, bindGroup] = Display.createRenderTarget(
+      device,
+      this.format,
+      width,
+      height
+    );
     this.bindGroup = bindGroup;
     this.view = view;
     logi('[display]', `resize to ${width}x${height}`);
@@ -423,7 +534,14 @@ export class Display {
   ): void {
     const pass = encoder.beginRenderPass({
       label: 'render pass',
-      colorAttachments: [{ view: target, clearValue: backgroundColor, loadOp: 'clear', storeOp: 'store' }]
+      colorAttachments: [
+        {
+          view: target,
+          clearValue: backgroundColor,
+          loadOp: 'clear',
+          storeOp: 'store'
+        }
+      ]
     });
     pass.setBindGroup(0, this.bindGroup);
     pass.setBindGroup(1, this.envBg);
@@ -464,6 +582,13 @@ export class GaussianRenderer {
 
   private _indirectInitBuf = new ArrayBuffer(16);
   private _indirectInitDV = new DataView(this._indirectInitBuf);
+
+  // frame counter for debug throttling
+  private _frameIndex = 0;
+
+  // last-hash tracking (so we only dump bytes when payload actually changes)
+  private _lastCamHash: string | null = null;
+  private _lastSetHash: string | null = null;
 
   private constructor(
     pipeline: GPURenderPipeline,
@@ -508,7 +633,10 @@ export class GaussianRenderer {
     shDeg: number,
     compressed: boolean
   ): Promise<GaussianRenderer> {
-    logi('[renderer::new]', `color_format=${colorFormat}, sh_deg=${shDeg}, compressed=${compressed}`);
+    logi(
+      '[renderer::new]',
+      `color_format=${colorFormat}, sh_deg=${shDeg}, compressed=${compressed}`
+    );
 
     const sorter = await GPURSSorter.create(device, queue);
 
@@ -521,7 +649,10 @@ export class GaussianRenderer {
     });
 
     const gaussianSrc = await (await fetch('./shaders/gaussian.wgsl')).text();
-    const gaussianModule = device.createShaderModule({ label: 'gaussian shader', code: gaussianSrc });
+    const gaussianModule = device.createShaderModule({
+      label: 'gaussian shader',
+      code: gaussianSrc
+    });
 
     const pipeline = device.createRenderPipeline({
       label: 'render pipeline',
@@ -534,8 +665,16 @@ export class GaussianRenderer {
           {
             format: colorFormat,
             blend: {
-              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+              color: {
+                srcFactor: 'one',
+                dstFactor: 'one-minus-src-alpha',
+                operation: 'add'
+              },
+              alpha: {
+                srcFactor: 'one',
+                dstFactor: 'one-minus-src-alpha',
+                operation: 'add'
+              }
             },
             writeMask: GPUColorWrite.ALL
           }
@@ -547,7 +686,11 @@ export class GaussianRenderer {
     const drawIndirectBuffer = device.createBuffer({
       label: 'indirect draw buffer',
       size: 16,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+      usage:
+        GPUBufferUsage.INDIRECT |
+        GPUBufferUsage.STORAGE |
+        GPUBufferUsage.COPY_DST |
+        GPUBufferUsage.COPY_SRC
     });
 
     const drawIndirectLayout = GaussianRenderer.bindGroupLayout(device);
@@ -558,12 +701,28 @@ export class GaussianRenderer {
     });
 
     const sortPreLayout = GPURSSorter.bindGroupLayoutPreprocess(device);
-    const preprocess = await PreprocessPipeline.create(device, shDeg, compressed, sortPreLayout);
+    const preprocess = await PreprocessPipeline.create(
+      device,
+      shDeg,
+      compressed,
+      sortPreLayout
+    );
 
-    const cameraUB = UniformBuffer.newDefault(device, 'camera uniform buffer', 68 * 4);
-    const settingsUB = UniformBuffer.newDefault(device, 'render settings uniform buffer', 80);
+    const cameraUB = UniformBuffer.newDefault(
+      device,
+      'camera uniform buffer',
+      68 * 4
+    );
+    const settingsUB = UniformBuffer.newDefault(
+      device,
+      'render settings uniform buffer',
+      80
+    );
 
-    logi('[renderer::new]', `buffers ready; draw_indirect.size=${drawIndirectBuffer.size} bytes`);
+    logi(
+      '[renderer::new]',
+      `buffers ready; draw_indirect.size=${drawIndirectBuffer.size} bytes`
+    );
 
     return new GaussianRenderer(
       pipeline,
@@ -586,7 +745,9 @@ export class GaussianRenderer {
   static bindGroupLayout(device: GPUDevice): GPUBindGroupLayout {
     return device.createBindGroupLayout({
       label: 'draw indirect',
-      entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }]
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }
+      ]
     });
   }
 
@@ -634,7 +795,10 @@ export class GaussianRenderer {
 
   private writeInitialDrawIndirect(queue: GPUQueue): void {
     queue.writeBuffer(this.drawIndirectBuffer, 0, this._indirectInitBuf);
-    logi('[preprocess]', 'wrote DrawIndirectArgs { vertex_count=4, instance_count=0, first_vertex=0, first_instance=0 }');
+    logi(
+      '[preprocess]',
+      'wrote DrawIndirectArgs { vertex_count=4, instance_count=0, first_vertex=0, first_instance=0 }'
+    );
   }
 
   /* ---------- core steps ---------- */
@@ -671,12 +835,26 @@ export class GaussianRenderer {
 
     const cameraBytes = this.serializeCameraUniform(cu);
     const camHash = hashBytesU64(cameraBytes);
-    logi('[preprocess]', `CameraUniform.size=${cameraBytes.byteLength} hash=${camHash}`);
+    logi(
+      '[preprocess]',
+      `CameraUniform.size=${cameraBytes.byteLength} hash=${camHash}`
+    );
+    if (this._lastCamHash !== camHash) {
+      dumpU32('[preprocess] CameraUniform.bytes(u32le)=', cameraBytes);
+      this._lastCamHash = camHash;
+    }
 
     const su = SplattingArgsUniform.fromArgsAndPc(renderSettings, pc);
     const settingsBytes = this.serializeSettingsUniform(su);
     const setHash = hashBytesU64(settingsBytes);
-    logi('[preprocess]', `SplattingArgsUniform.size=${settingsBytes.byteLength} hash=${setHash}`);
+    logi(
+      '[preprocess]',
+      `SplattingArgsUniform.size=${settingsBytes.byteLength} hash=${setHash}`
+    );
+    if (this._lastSetHash !== setHash) {
+      dumpU32('[preprocess] SplattingArgsUniform.bytes(u32le)=', settingsBytes);
+      this._lastSetHash = setHash;
+    }
 
     // Upload to GPU
     this.cameraUB.setData(new Uint8Array(cameraBytes));
@@ -686,6 +864,9 @@ export class GaussianRenderer {
 
     // init indirect
     this.writeInitialDrawIndirect(queue);
+
+    // **One-shot gate flip after first successful frame prep**
+    (globalThis as any).__LOGGING_ENABLED__ = false;
 
     return [this.cameraUB.bind_group(), this.settingsUB.bind_group()];
   }
@@ -708,20 +889,63 @@ export class GaussianRenderer {
       );
     }
 
-    GPURSSorter.recordResetIndirectBuffer(this.sorterStuff.sorterDis, this.sorterStuff.sorterUni, queue);
+    GPURSSorter.recordResetIndirectBuffer(
+      this.sorterStuff.sorterDis,
+      this.sorterStuff.sorterUni,
+      queue
+    );
     logi('[prepare]', 'reset indirect & uniform sorter buffers');
 
     if (stopwatch) stopwatch.start(encoder, 'preprocess');
     const [cameraBG, settingsBG] = this.preprocessStep(queue, pc, renderSettings);
-    this.preprocess.run(encoder, pc, cameraBG, this.sorterStuff.sorterBgPre, settingsBG);
+    this.preprocess.run(
+      encoder,
+      pc,
+      cameraBG,
+      this.sorterStuff.sorterBgPre,
+      settingsBG
+    );
     if (stopwatch) stopwatch.stop(encoder, 'preprocess');
 
     if (stopwatch) stopwatch.start(encoder, 'sorting');
-    this.sorter.recordSortIndirect(this.sorterStuff.sorterBg, this.sorterStuff.sorterDis, encoder);
+    this.sorter.recordSortIndirect(
+      this.sorterStuff.sorterBg,
+      this.sorterStuff.sorterDis,
+      encoder
+    );
     if (stopwatch) stopwatch.stop(encoder, 'sorting');
 
+    // write instance_count into drawIndirect[+4]
     encoder.copyBufferToBuffer(this.sorterStuff.sorterUni, 0, this.drawIndirectBuffer, 4, 4);
     logi('[prepare]', 'copied visible instance_count into draw_indirect_buffer[+4]');
+
+    // Optional: read back indirect + visible for this frame
+    this._frameIndex++;
+    if (
+      DEBUG_READBACK_EVERY_N_FRAMES > 0 &&
+      (this._frameIndex % DEBUG_READBACK_EVERY_N_FRAMES === 0)
+    ) {
+      (async () => {
+        try {
+          const idab = await readbackBuffer(device, this.drawIndirectBuffer, 16);
+          const id = new Uint32Array(idab);
+          const visab = await readbackBuffer(device, this.sorterStuff!.sorterUni, 4);
+          const vis = new Uint32Array(visab)[0] >>> 0;
+
+          if (loggingEnabled()) {
+            console.log('[indirect]', {
+              vertexCount: id[0] >>> 0,
+              instanceCount: id[1] >>> 0,
+              firstVertex: id[2] >>> 0,
+              firstInstance: id[3] >>> 0
+            });
+            console.log('[visibleCount]', vis);
+          }
+        } catch (e) {
+          if (loggingEnabled()) console.warn('[debug-readback] failed:', e);
+        }
+      })();
+    }
   }
 
   render(renderPass: GPURenderPassEncoder, pc: PointCloud): void {

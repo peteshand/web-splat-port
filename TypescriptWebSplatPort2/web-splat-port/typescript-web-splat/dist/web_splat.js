@@ -3158,6 +3158,13 @@ var forEach3 = (function() {
 })();
 
 // src/camera.ts
+function loggingEnabled() {
+  return globalThis.__LOGGING_ENABLED__ ?? true;
+}
+function clog(...args) {
+  if (!loggingEnabled()) return;
+  console.log("[camera]", ...args);
+}
 var VIEWPORT_Y_FLIP = mat4_exports.fromValues(
   1,
   0,
@@ -3179,35 +3186,34 @@ var VIEWPORT_Y_FLIP = mat4_exports.fromValues(
 function build_proj(znear, zfar, fov_x, fov_y) {
   const tanHalfY = Math.tan(fov_y * 0.5);
   const tanHalfX = Math.tan(fov_x * 0.5);
-  const top = tanHalfY * znear;
-  const bottom = -top;
-  const right = tanHalfX * znear;
-  const left = -right;
+  const top = tanHalfY * znear, bottom = -top;
+  const right = tanHalfX * znear, left = -right;
   const m = mat4_exports.create();
   m[0] = 2 * znear / (right - left);
   m[5] = 2 * znear / (top - bottom);
   m[8] = (right + left) / (right - left);
   m[9] = (top + bottom) / (top - bottom);
+  m[11] = 1;
   m[10] = zfar / (zfar - znear);
   m[14] = -(zfar * znear) / (zfar - znear);
-  m[11] = 1;
   m[15] = 0;
   return m;
 }
 function focal2fov(focal, pixels) {
-  return 2 * Math.atan(pixels / (2 * focal));
+  const out = 2 * Math.atan(pixels / (2 * focal));
+  clog("focal2fov()", { focal, pixels, out });
+  return out;
 }
 function fov2focal(fov, pixels) {
-  return pixels / (2 * Math.tan(fov * 0.5));
+  const out = pixels / (2 * Math.tan(fov * 0.5));
+  clog("fov2focal()", { fov, pixels, out });
+  return out;
 }
 var PerspectiveProjection = class _PerspectiveProjection {
   fovx;
-  // radians
   fovy;
-  // radians
   znear;
   zfar;
-  /** fov ratio to viewport ratio (fov2view_ratio) */
   fov2view_ratio;
   constructor(fovx, fovy, znear, zfar, fov2view_ratio = 1) {
     this.fovx = fovx;
@@ -3215,59 +3221,67 @@ var PerspectiveProjection = class _PerspectiveProjection {
     this.znear = znear;
     this.zfar = zfar;
     this.fov2view_ratio = fov2view_ratio;
+    clog("PerspectiveProjection.ctor", { fovx, fovy, znear, zfar, fov2view_ratio });
   }
   static new(viewport, fov, znear, zfar) {
     const vr = viewport[0] / viewport[1];
     const fr = fov[0] / fov[1];
+    clog("PerspectiveProjection.new()", { viewport: Array.from(viewport), fov: Array.from(fov), znear, zfar, vr, fr });
     return new _PerspectiveProjection(fov[0], fov[1], znear, zfar, vr / fr);
   }
   projection_matrix() {
     return this.projectionMatrix();
   }
   projectionMatrix() {
-    return build_proj(this.znear, this.zfar, this.fovx, this.fovy);
+    const m = build_proj(this.znear, this.zfar, this.fovx, this.fovy);
+    clog("projectionMatrix()", { fovx: this.fovx, fovy: this.fovy, znear: this.znear, zfar: this.zfar });
+    return m;
   }
   resize(width, height) {
+    const prev = { fovx: this.fovx, fovy: this.fovy };
     const ratio = width / height;
     if (width > height) {
       this.fovy = this.fovx / ratio * this.fov2view_ratio;
     } else {
       this.fovx = this.fovy * ratio * this.fov2view_ratio;
     }
+    clog("PerspectiveProjection.resize()", { width, height, ratio, before: prev, after: { fovx: this.fovx, fovy: this.fovy }, fov2view_ratio: this.fov2view_ratio });
   }
-  /** Focal lengths in pixels for a given viewport */
   focal(viewport) {
-    return vec2_exports.fromValues(
-      fov2focal(this.fovx, viewport[0]),
-      fov2focal(this.fovy, viewport[1])
-    );
+    const fx = fov2focal(this.fovx, viewport[0]);
+    const fy = fov2focal(this.fovy, viewport[1]);
+    const out = vec2_exports.fromValues(fx, fy);
+    clog("PerspectiveProjection.focal()", { viewport: Array.from(viewport), fx, fy });
+    return out;
   }
   lerp(other, amount) {
     const a = amount, b = 1 - amount;
-    return new _PerspectiveProjection(
+    const out = new _PerspectiveProjection(
       this.fovx * b + other.fovx * a,
       this.fovy * b + other.fovy * a,
       this.znear * b + other.znear * a,
       this.zfar * b + other.zfar * a,
       this.fov2view_ratio * b + other.fov2view_ratio * a
     );
+    clog("PerspectiveProjection.lerp()", { amount, from: { fovx: this.fovx, fovy: this.fovy, znear: this.znear, zfar: this.zfar, r: this.fov2view_ratio }, to: { fovx: other.fovx, fovy: other.fovy, znear: other.znear, zfar: other.zfar, r: other.fov2view_ratio }, out: { fovx: out.fovx, fovy: out.fovy, znear: out.znear, zfar: out.zfar, r: out.fov2view_ratio } });
+    return out;
   }
 };
 var PerspectiveCamera = class _PerspectiveCamera {
   position;
-  // Point3<f32>
   rotation;
-  // Quaternion<f32>
   projection;
   constructor(position, rotation, projection2) {
     this.position = vec3_exports.clone(position);
     this.rotation = quat_exports.clone(rotation);
     this.projection = projection2;
+    clog("PerspectiveCamera.ctor", { position: Array.from(this.position), rotation: Array.from(this.rotation) });
   }
   static default() {
+    clog("PerspectiveCamera.default()");
     return new _PerspectiveCamera(
       vec3_exports.fromValues(0, 0, -1),
-      quat_exports.fromValues(1, 0, 0, 0),
+      quat_exports.create(),
       new PerspectiveProjection(
         45 * Math.PI / 180,
         45 * Math.PI / 180,
@@ -3290,19 +3304,21 @@ var PerspectiveCamera = class _PerspectiveCamera {
     this.projection.zfar = zfar;
     this.projection.znear = znear;
   }
-  // ---- Camera trait methods (camelCase + 1:1 aliases) ----
+  // Match Rust: world2view(R, t) => inverse().transpose()
   viewMatrix() {
-    const w = mat4_exports.create();
-    mat4_exports.fromRotationTranslation(w, this.rotation, this.position);
-    const v = mat4_exports.create();
-    mat4_exports.invert(v, w);
-    return v;
+    const world = mat4_exports.create();
+    mat4_exports.fromRotationTranslation(world, this.rotation, this.position);
+    const view = mat4_exports.create();
+    mat4_exports.invert(view, world);
+    return view;
   }
   view_matrix() {
     return this.viewMatrix();
   }
   projMatrix() {
-    return this.projection.projectionMatrix();
+    const m = this.projection.projectionMatrix();
+    clog("PerspectiveCamera.projMatrix()");
+    return m;
   }
   proj_matrix() {
     return this.projMatrix();
@@ -3310,8 +3326,6 @@ var PerspectiveCamera = class _PerspectiveCamera {
   positionVec() {
     return vec3_exports.clone(this.position);
   }
-  // ❌ remove this method; it collides with the field name
-  // position(): vec3 { return this.positionVec(); }
   frustum_planes() {
     const p = this.projMatrix();
     const v = this.viewMatrix();
@@ -3346,26 +3360,52 @@ var PerspectiveCamera = class _PerspectiveCamera {
     const top = normalize5(sub6(r3, r1));
     const near2 = normalize5(add7(r3, r2));
     const far = normalize5(sub6(r3, r2));
+    clog("PerspectiveCamera.frustum_planes() computed");
     return { near: near2, far, left, right, top, bottom };
   }
-  // SPLIT interpolation (Slerp for rotation, linear for others)
   lerp(other, amount) {
     const outPos = vec3_exports.create();
     vec3_exports.lerp(outPos, this.position, other.position, amount);
     const outRot = quat_exports.create();
     quat_exports.slerp(outRot, this.rotation, other.rotation, amount);
     const proj = this.projection.lerp(other.projection, amount);
-    return new _PerspectiveCamera(outPos, outRot, proj);
+    const out = new _PerspectiveCamera(outPos, outRot, proj);
+    clog("PerspectiveCamera.lerp()", { amount, fromPos: Array.from(this.position), toPos: Array.from(other.position) });
+    return out;
   }
 };
 
 // src/uniform.ts
+function loggingEnabled2() {
+  const g = globalThis;
+  if (typeof g.__LOGGING_ENABLED__ === "undefined") {
+    g.__LOGGING_ENABLED__ = true;
+  }
+  return !!g.__LOGGING_ENABLED__;
+}
+function logi(tag, msg, extra) {
+  if (!loggingEnabled2()) return;
+  if (extra !== void 0) {
+    console.log(`${tag} ${msg}`, extra);
+  } else {
+    console.log(`${tag} ${msg}`);
+  }
+}
+function hashBytesU64View(v) {
+  let h = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  const u8 = v instanceof Uint8Array ? v : new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+  for (let i = 0; i < u8.length; i++) {
+    h ^= BigInt(u8[i]);
+    h = h * prime & 0xffffffffffffffffn;
+  }
+  return h.toString(16).padStart(16, "0");
+}
 var UniformBuffer = class _UniformBuffer {
   _buffer;
   _data;
   _label;
   _bind_group;
-  // ---- new_default ----
   static newDefault(device, label, byteLength = 256) {
     const buffer = device.createBuffer({
       label,
@@ -3381,9 +3421,9 @@ var UniformBuffer = class _UniformBuffer {
       layout: _UniformBuffer.bindGroupLayout(device),
       entries: [{ binding: 0, resource: { buffer } }]
     });
+    logi("[uniform::new_default]", `label=${String(label)} size=${byteLength} bytes`);
     return new _UniformBuffer(buffer, void 0, label, bind_group);
   }
-  // ---- new ----
   static new(device, data, label) {
     const buffer = device.createBuffer({
       label,
@@ -3401,6 +3441,7 @@ var UniformBuffer = class _UniformBuffer {
       layout: _UniformBuffer.bindGroupLayout(device),
       entries: [{ binding: 0, resource: { buffer } }]
     });
+    logi("[uniform::new]", `label=${String(label)} size=${data.byteLength} bytes`);
     return new _UniformBuffer(buffer, data, label, bind_group);
   }
   constructor(buffer, data, label, bind_group) {
@@ -3409,32 +3450,28 @@ var UniformBuffer = class _UniformBuffer {
     this._label = label;
     this._bind_group = bind_group;
   }
-  /* ----------------------------- Rust-style API ----------------------------- */
-  // buffer(&self) -> &wgpu::Buffer
   buffer() {
     return this._buffer;
   }
-  // data(&self) -> &T
   data() {
     return this._data;
   }
-  // pub fn bind_group_layout(device: &Device) -> BindGroupLayout
   static bind_group_layout(device) {
     return this.bindGroupLayout(device);
   }
-  // pub fn binding_type() -> BindingType
   static binding_type() {
     return this.bindingType();
   }
-  // pub fn sync(&mut self, queue: &Queue)
   sync(queue) {
     const v = this._data;
     if (!v || !(v.buffer instanceof ArrayBuffer || typeof SharedArrayBuffer !== "undefined" && v.buffer instanceof SharedArrayBuffer)) {
       throw new Error("UniformBuffer.sync(): data is not an ArrayBufferView. Provide bytes or use setData(bytes) first.");
     }
+    const bytesView = v instanceof Uint8Array ? v : new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    const hash = hashBytesU64View(bytesView);
+    logi("[uniform::sync]", `label=${String(this._label)} size=${bytesView.byteLength} hash=${hash}`);
     queue.writeBuffer(this._buffer, 0, v.buffer, v.byteOffset, v.byteLength);
   }
-  // pub fn clone(&self, device: &Device, queue: &Queue) -> Self
   clone(device, queue) {
     const buffer = device.createBuffer({
       label: this._label,
@@ -3452,11 +3489,9 @@ var UniformBuffer = class _UniformBuffer {
     });
     return new _UniformBuffer(buffer, this._data, this._label, bind_group);
   }
-  // pub fn bind_group(&self) -> &wgpu::BindGroup
   bind_group() {
     return this._bind_group;
   }
-  /* --------------------------- TS-friendly aliases -------------------------- */
   bufferRef() {
     return this._buffer;
   }
@@ -3469,31 +3504,32 @@ var UniformBuffer = class _UniformBuffer {
   setData(bytes) {
     this._data = bytes;
   }
-  /* --------------------------- Layout helpers (TS) -------------------------- */
   static bindGroupLayout(device) {
     return device.createBindGroupLayout({
       label: "uniform bind group layout",
-      entries: [{
-        binding: 0,
-        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
-        buffer: _UniformBuffer.bindingType()
-      }]
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
+          buffer: _UniformBuffer.bindingType()
+        }
+      ]
     });
   }
   static bindingType() {
     return {
       type: "uniform",
       hasDynamicOffset: false
-      // minBindingSize: can be set if you want strict validation
     };
   }
 };
 
 // src/pointcloud.ts
-function toArrayBuffer(src) {
-  if (src instanceof ArrayBuffer) return src.slice(0);
-  const { buffer, byteOffset, byteLength } = src;
-  return buffer.slice(byteOffset, byteOffset + byteLength);
+function pclog(...args) {
+  console.log("[pointcloud]", ...args);
+}
+function asBytes(src) {
+  return src instanceof ArrayBuffer ? new Uint8Array(src) : new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
 }
 function halfToFloat(h) {
   const s = (h & 32768) >> 15, e = (h & 31744) >> 10, f = h & 1023;
@@ -3552,13 +3588,46 @@ var Aabb = class _Aabb {
   }
 };
 var BYTES_PER_SPLAT = 20;
+var LAYOUTS = /* @__PURE__ */ new WeakMap();
+function getLayouts(device) {
+  let l = LAYOUTS.get(device);
+  if (l) return l;
+  const plain = device.createBindGroupLayout({
+    label: "point cloud float bind group layout",
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
+    ]
+  });
+  const compressed = device.createBindGroupLayout({
+    label: "point cloud bind group layout (compressed)",
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
+    ]
+  });
+  const render = device.createBindGroupLayout({
+    label: "point cloud rendering bind group layout",
+    entries: [
+      { binding: 2, visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+    ]
+  });
+  l = { plain, compressed, render };
+  LAYOUTS.set(device, l);
+  pclog("getLayouts(): created new layouts");
+  return l;
+}
 var PointCloud = class _PointCloud {
   splat_2d_buffer;
-  // renamed private fields (leading underscore) to avoid clashing with methods
+  // internal fields (underscore to avoid clashes with Rust-style getter names)
   _bind_group;
   _render_bind_group;
-  num_points;
-  sh_deg;
+  num_points_;
+  sh_deg_;
   bbox_;
   compressed_;
   center_;
@@ -3573,46 +3642,47 @@ var PointCloud = class _PointCloud {
   covars_buffer;
   // compressed only
   quantization_uniform;
+  // captured for optional debug
   _gaussianSrc;
   _shSrc;
-  // ---- new(device, pc) ----
   static new(device, pc) {
     return new _PointCloud(device, pc);
   }
   constructor(device, pc) {
-    this._gaussianSrc = toArrayBuffer(pc.gaussian_buffer());
-    this._shSrc = toArrayBuffer(pc.sh_coefs_buffer());
+    const gaussBytes = asBytes(pc.gaussian_buffer());
+    const shBytes = asBytes(pc.sh_coefs_buffer());
+    this._gaussianSrc = gaussBytes;
+    this._shSrc = shBytes;
     this.splat_2d_buffer = device.createBuffer({
       label: "2d gaussians buffer",
-      size: pc.num_points * BYTES_PER_SPLAT,
+      size: (pc.num_points >>> 0) * BYTES_PER_SPLAT,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE
     });
+    pclog("ctor: created splat_2d_buffer", {
+      bytes: (pc.num_points >>> 0) * BYTES_PER_SPLAT,
+      num_points: pc.num_points
+    });
+    const { render, plain, compressed } = getLayouts(device);
     this._render_bind_group = device.createBindGroup({
       label: "point cloud rendering bind group",
-      layout: _PointCloud.bind_group_layout_render(device),
-      entries: [
-        {
-          binding: 2,
-          resource: { buffer: this.splat_2d_buffer }
-        }
-      ]
+      layout: render,
+      entries: [{ binding: 2, resource: { buffer: this.splat_2d_buffer } }]
     });
+    pclog("ctor: created render bind group");
     this.vertex_buffer = device.createBuffer({
       label: "3d gaussians buffer",
-      size: pc.gaussian_buffer().byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true
+      size: gaussBytes.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
-    new Uint8Array(this.vertex_buffer.getMappedRange()).set(new Uint8Array(pc.gaussian_buffer()));
-    this.vertex_buffer.unmap();
+    device.queue.writeBuffer(this.vertex_buffer, 0, gaussBytes);
+    pclog("ctor: uploaded vertex_buffer", { bytes: gaussBytes.byteLength });
     this.sh_buffer = device.createBuffer({
       label: "sh coefs buffer",
-      size: pc.sh_coefs_buffer().byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true
+      size: shBytes.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
-    new Uint8Array(this.sh_buffer.getMappedRange()).set(new Uint8Array(pc.sh_coefs_buffer()));
-    this.sh_buffer.unmap();
+    device.queue.writeBuffer(this.sh_buffer, 0, shBytes);
+    pclog("ctor: uploaded sh_buffer", { bytes: shBytes.byteLength });
     const entries = [
       { binding: 0, resource: { buffer: this.vertex_buffer } },
       // read-only
@@ -3623,34 +3693,33 @@ var PointCloud = class _PointCloud {
     ];
     if (pc.compressed()) {
       if (!pc.covars) throw new Error("compressed() true but covars missing");
+      const covBytes = asBytes(pc.covars);
       this.covars_buffer = device.createBuffer({
         label: "Covariances buffer",
-        size: pc.covars.byteLength ?? pc.covars.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
+        size: covBytes.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
       });
-      new Uint8Array(this.covars_buffer.getMappedRange()).set(
-        pc.covars instanceof ArrayBuffer ? new Uint8Array(pc.covars) : new Uint8Array(pc.covars)
-      );
-      this.covars_buffer.unmap();
+      device.queue.writeBuffer(this.covars_buffer, 0, covBytes);
       entries.push({ binding: 3, resource: { buffer: this.covars_buffer } });
       if (!pc.quantization) throw new Error("compressed() true but quantization missing");
       this.quantization_uniform = UniformBuffer.new(device, pc.quantization, "quantization uniform buffer");
       entries.push({ binding: 4, resource: { buffer: this.quantization_uniform.bufferRef() } });
       this._bind_group = device.createBindGroup({
         label: "point cloud bind group (compressed)",
-        layout: _PointCloud.bind_group_layout_compressed(device),
+        layout: compressed,
         entries
       });
+      pclog("ctor: created preprocess bind group (compressed)");
     } else {
       this._bind_group = device.createBindGroup({
         label: "point cloud bind group",
-        layout: _PointCloud.bind_group_layout(device),
+        layout: plain,
         entries
       });
+      pclog("ctor: created preprocess bind group (plain)");
     }
-    this.num_points = pc.num_points >>> 0;
-    this.sh_deg = pc.sh_deg >>> 0;
+    this.num_points_ = pc.num_points >>> 0;
+    this.sh_deg_ = pc.sh_deg >>> 0;
     this.compressed_ = pc.compressed();
     this.bbox_ = new Aabb(pc.aabb.min, pc.aabb.max);
     this.center_ = { ...pc.center };
@@ -3658,61 +3727,95 @@ var PointCloud = class _PointCloud {
     this.mip_splatting_ = pc.mip_splatting;
     this.kernel_size_ = pc.kernel_size;
     this.background_color_ = pc.background_color ? { r: pc.background_color[0], g: pc.background_color[1], b: pc.background_color[2], a: 1 } : void 0;
+    pclog("ctor: initialized fields", {
+      num_points: this.num_points_,
+      sh_deg: this.sh_deg_,
+      compressed: this.compressed_,
+      bbox: this.bbox_,
+      center: this.center_,
+      mip_splatting: this.mip_splatting_,
+      kernel_size: this.kernel_size_,
+      background_color: this.background_color_
+    });
   }
   // --- DEBUG: log first Gaussian & SH buffer sanity info
   debugLogFirstGaussian() {
-    const buf = this._gaussianSrc;
-    if (!buf) {
+    if (!this._gaussianSrc) {
       console.warn("[pc] no gaussian src captured");
       return;
     }
-    const dv = new DataView(buf);
+    if (this.compressed_) {
+      console.log("[pc] compressed point cloud; first-gaussian debug for raw halfs is skipped");
+      console.log("[pc] aabb:", this.bbox_, "num_points:", this.num_points_);
+      return;
+    }
+    const dv = new DataView(this._gaussianSrc.buffer, this._gaussianSrc.byteOffset, this._gaussianSrc.byteLength);
     const halves = [];
-    for (let i = 0; i < 10; i++) halves.push(dv.getUint16(i * 2, true));
+    for (let i = 0; i < Math.min(10, this._gaussianSrc.byteLength / 2 | 0); i++) {
+      halves.push(dv.getUint16(i * 2, true));
+    }
     const floats = halves.map(halfToFloat);
     const xyz = floats.slice(0, 3);
     const opacity = floats[3];
-    const cov = floats.slice(4);
+    const cov = floats.slice(4, 10);
     console.log("[pc] first gaussian (halfs):", halves);
     console.log("[pc] first gaussian (floats):", { xyz, opacity, cov });
     console.log("[pc] aabb:", this.bbox_);
-    console.log("[pc] num_points:", this.num_points);
-    const expectedSH = this.num_points * 24 * 4;
-    console.log("[pc] sh bytes:", this._shSrc?.byteLength, "expected:", expectedSH);
+    console.log("[pc] num_points:", this.num_points_);
+    console.log("[pc] sh bytes:", this._shSrc?.byteLength);
   }
   // ---- getters matching Rust API ----
   compressed() {
     return this.compressed_;
   }
+  num_points() {
+    return this.num_points_;
+  }
+  // exact Rust name
   numPoints() {
-    return this.num_points;
+    return this.num_points_;
   }
+  sh_deg() {
+    return this.sh_deg_;
+  }
+  // exact Rust name
   shDeg() {
-    return this.sh_deg;
+    return this.sh_deg_;
   }
+  // TS convenience
   bbox() {
     return this.bbox_;
   }
-  // Rust names (methods) — keep names; return the underscored fields
+  // Rust names (methods)
   bind_group() {
     return this._bind_group;
   }
   render_bind_group() {
     return this._render_bind_group;
   }
-  // TS-friendly aliases used by your renderer.ts:
+  // TS-friendly aliases used by renderer.ts:
   getBindGroup() {
     return this._bind_group;
   }
   getRenderBindGroup() {
     return this._render_bind_group;
   }
+  mip_splatting() {
+    return this.mip_splatting_;
+  }
+  // exact Rust
   mipSplatting() {
     return this.mip_splatting_;
   }
+  // TS convenience
+  dilation_kernel_size() {
+    return this.kernel_size_;
+  }
+  // exact Rust
   dilationKernelSize() {
     return this.kernel_size_;
   }
+  // TS convenience
   center() {
     return this.center_;
   }
@@ -3721,70 +3824,13 @@ var PointCloud = class _PointCloud {
   }
   // ---- static bind group layouts (exact bindings/visibility as Rust) ----
   static bind_group_layout_compressed(device) {
-    return device.createBindGroupLayout({
-      label: "point cloud bind group layout (compressed)",
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "read-only-storage", hasDynamicOffset: false }
-        },
-        {
-          binding: 1,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "read-only-storage", hasDynamicOffset: false }
-        },
-        {
-          binding: 2,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "storage", hasDynamicOffset: false }
-        },
-        {
-          binding: 3,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "read-only-storage", hasDynamicOffset: false }
-        },
-        {
-          binding: 4,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "uniform", hasDynamicOffset: false }
-        }
-      ]
-    });
+    return getLayouts(device).compressed;
   }
   static bind_group_layout(device) {
-    return device.createBindGroupLayout({
-      label: "point cloud float bind group layout",
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "read-only-storage", hasDynamicOffset: false }
-        },
-        {
-          binding: 1,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "read-only-storage", hasDynamicOffset: false }
-        },
-        {
-          binding: 2,
-          visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "storage", hasDynamicOffset: false }
-        }
-      ]
-    });
+    return getLayouts(device).plain;
   }
   static bind_group_layout_render(device) {
-    return device.createBindGroupLayout({
-      label: "point cloud rendering bind group layout",
-      entries: [
-        {
-          binding: 2,
-          visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE,
-          buffer: { type: "read-only-storage", hasDynamicOffset: false }
-        }
-      ]
-    });
+    return getLayouts(device).render;
   }
 };
 
@@ -4298,6 +4344,64 @@ async function downloadBufferF32(device, queue, src, count) {
 }
 
 // src/renderer.ts
+var __g = globalThis;
+if (typeof __g.__LOGGING_ENABLED__ === "undefined") {
+  __g.__LOGGING_ENABLED__ = true;
+}
+function loggingEnabled3() {
+  return !!globalThis.__LOGGING_ENABLED__;
+}
+function logi2(tag, msg, extra) {
+  if (!loggingEnabled3()) return;
+  if (extra !== void 0) {
+    console.log(`${tag} ${msg}`, extra);
+  } else {
+    console.log(`${tag} ${msg}`);
+  }
+}
+function fmtF32Slice(a) {
+  const out = [];
+  const n = a.length;
+  for (let i = 0; i < n; i++) out.push(a[i].toFixed(7));
+  return `[${out.join(",")}]`;
+}
+function hashBytesU64(bytes) {
+  let h = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let i = 0; i < u8.length; i++) {
+    h ^= BigInt(u8[i]);
+    h = h * prime & 0xffffffffffffffffn;
+  }
+  return h.toString(16).padStart(16, "0");
+}
+function mat4ColMajorToArray(m) {
+  return new Float32Array(m);
+}
+var DEBUG_READBACK_EVERY_N_FRAMES = 1;
+function u8ToU32LE(u8) {
+  const n = Math.floor(u8.byteLength / 4);
+  return new Uint32Array(u8.buffer, u8.byteOffset, n);
+}
+function dumpU32(label, u8) {
+  if (!loggingEnabled3()) return;
+  const u32 = u8ToU32LE(u8);
+  console.log(label, Array.from(u32));
+}
+async function readbackBuffer(device, src, size) {
+  const rb = device.createBuffer({
+    size: size + 255 & ~255,
+    // 256 alignment
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+  });
+  const enc = device.createCommandEncoder({ label: "rb-encoder" });
+  enc.copyBufferToBuffer(src, 0, rb, 0, size);
+  device.queue.submit([enc.finish()]);
+  await rb.mapAsync(GPUMapMode.READ);
+  const slice = rb.getMappedRange().slice(0, size);
+  rb.unmap();
+  return slice;
+}
 var CameraUniform = class {
   viewMatrix;
   viewInvMatrix;
@@ -4318,9 +4422,9 @@ var CameraUniform = class {
     mat4_exports.invert(this.viewInvMatrix, viewMatrix);
   }
   setProjMat(projMatrix) {
-    const tmp = mat4_exports.create();
-    mat4_exports.multiply(tmp, VIEWPORT_Y_FLIP, projMatrix);
-    mat4_exports.copy(this.projMatrix, tmp);
+    const flipped = mat4_exports.create();
+    mat4_exports.multiply(flipped, VIEWPORT_Y_FLIP, projMatrix);
+    mat4_exports.copy(this.projMatrix, flipped);
     mat4_exports.invert(this.projInvMatrix, projMatrix);
   }
   setCamera(camera) {
@@ -4393,7 +4497,6 @@ var SplattingArgsUniform = class _SplattingArgsUniform {
 };
 var PreprocessPipeline = class _PreprocessPipeline {
   pipeline;
-  // layouts captured so we can create/pass matching bind groups
   cameraLayout;
   pcLayout;
   sortPreLayout;
@@ -4408,23 +4511,27 @@ var PreprocessPipeline = class _PreprocessPipeline {
     const cameraLayout = UniformBuffer.bind_group_layout(device);
     const pcLayout = compressed ? PointCloud.bind_group_layout_compressed(device) : PointCloud.bind_group_layout(device);
     const settingsLayout = UniformBuffer.bind_group_layout(device);
-    const self = new _PreprocessPipeline(cameraLayout, pcLayout, sortPreLayout, settingsLayout);
+    const self = new _PreprocessPipeline(
+      cameraLayout,
+      pcLayout,
+      sortPreLayout,
+      settingsLayout
+    );
     const wgslPath = compressed ? "./shaders/preprocess_compressed.wgsl" : "./shaders/preprocess.wgsl";
     const src = await (await fetch(wgslPath)).text();
     const code = `const MAX_SH_DEG : u32 = ${shDeg}u;
 ${src}`;
-    const module = device.createShaderModule({ label: "preprocess shader", code });
+    const module = device.createShaderModule({
+      label: "preprocess shader",
+      code
+    });
     const pipelineLayout = device.createPipelineLayout({
       label: "preprocess pipeline layout",
       bindGroupLayouts: [
         self.cameraLayout,
-        // group(0)
         self.pcLayout,
-        // group(1)
         self.sortPreLayout,
-        // group(2)
         self.settingsLayout
-        // group(3)
       ]
     });
     self.pipeline = device.createComputePipeline({
@@ -4432,16 +4539,18 @@ ${src}`;
       layout: pipelineLayout,
       compute: { module, entryPoint: "preprocess" }
     });
+    logi2("[preprocess::new]", `sh_deg=${shDeg}, compressed=${compressed}`);
     return self;
   }
   run(encoder, pc, cameraBG, sortPreBG, settingsBG) {
+    const wgsX = Math.ceil(pc.numPoints() / 256);
+    logi2("[preprocess::run]", `dispatch_x=${wgsX}, num_points=${pc.numPoints()}`);
     const pass = encoder.beginComputePass({ label: "preprocess compute pass" });
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, cameraBG);
     pass.setBindGroup(1, pc.getBindGroup());
     pass.setBindGroup(2, sortPreBG);
     pass.setBindGroup(3, settingsBG);
-    const wgsX = Math.ceil(pc.numPoints() / 256);
     pass.dispatchWorkgroups(wgsX, 1, 1);
     pass.end();
   }
@@ -4465,8 +4574,16 @@ var Display = class _Display {
     return device.createBindGroupLayout({
       label: "env map bind group layout",
       entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float", viewDimension: "2d" } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } }
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "2d" }
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: "filtering" }
+        }
       ]
     });
   }
@@ -4474,8 +4591,16 @@ var Display = class _Display {
     return device.createBindGroupLayout({
       label: "display bind group layout",
       entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float", viewDimension: "2d" } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } }
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "2d" }
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: "filtering" }
+        }
       ]
     });
   }
@@ -4487,7 +4612,11 @@ var Display = class _Display {
       usage: GPUTextureUsage.TEXTURE_BINDING
     }).createView();
     const textureView = envTexture ?? placeholderTexture;
-    const sampler = device.createSampler({ label: "env map sampler", magFilter: "linear", minFilter: "linear" });
+    const sampler = device.createSampler({
+      label: "env map sampler",
+      magFilter: "linear",
+      minFilter: "linear"
+    });
     return device.createBindGroup({
       label: "env map bind group",
       layout: _Display.envMapBindGroupLayout(device),
@@ -4521,17 +4650,16 @@ var Display = class _Display {
       label: "display pipeline layout",
       bindGroupLayouts: [
         _Display.bindGroupLayout(device),
-        // group(0)
         _Display.envMapBindGroupLayout(device),
-        // group(1)
         UniformBuffer.bind_group_layout(device),
-        // group(2): camera
         UniformBuffer.bind_group_layout(device)
-        // group(3): settings
       ]
     });
     const displaySrc = await (await fetch("./shaders/display.wgsl")).text();
-    const module = device.createShaderModule({ label: "display shader", code: displaySrc });
+    const module = device.createShaderModule({
+      label: "display shader",
+      code: displaySrc
+    });
     const pipeline = device.createRenderPipeline({
       label: "display pipeline",
       layout: pipelineLayout,
@@ -4539,19 +4667,35 @@ var Display = class _Display {
       fragment: {
         module,
         entryPoint: "fs_main",
-        targets: [{
-          format: targetFormat,
-          blend: {
-            color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
-            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
-          },
-          writeMask: GPUColorWrite.ALL
-        }]
+        targets: [
+          {
+            format: targetFormat,
+            blend: {
+              color: {
+                srcFactor: "one",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add"
+              },
+              alpha: {
+                srcFactor: "one",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add"
+              }
+            },
+            writeMask: GPUColorWrite.ALL
+          }
+        ]
       },
       primitive: { topology: "triangle-strip" }
     });
     const envBg = _Display.createEnvMapBg(device, null);
-    const [view, bindGroup] = _Display.createRenderTarget(device, sourceFormat, width, height);
+    const [view, bindGroup] = _Display.createRenderTarget(
+      device,
+      sourceFormat,
+      width,
+      height
+    );
+    logi2("[display::new]", `render_target ${width}x${height} format=${sourceFormat}`);
     return new _Display(pipeline, sourceFormat, view, bindGroup, envBg);
   }
   texture() {
@@ -4560,19 +4704,33 @@ var Display = class _Display {
   setEnvMap(device, envTexture) {
     this.envBg = _Display.createEnvMapBg(device, envTexture);
     this.hasEnvMap = envTexture !== null;
+    logi2("[display]", `set_env_map present=${this.hasEnvMap}`);
   }
   hasEnvMapSet() {
     return this.hasEnvMap;
   }
   resize(device, width, height) {
-    const [view, bindGroup] = _Display.createRenderTarget(device, this.format, width, height);
+    const [view, bindGroup] = _Display.createRenderTarget(
+      device,
+      this.format,
+      width,
+      height
+    );
     this.bindGroup = bindGroup;
     this.view = view;
+    logi2("[display]", `resize to ${width}x${height}`);
   }
   render(encoder, target, backgroundColor, camera, renderSettings) {
     const pass = encoder.beginRenderPass({
       label: "render pass",
-      colorAttachments: [{ view: target, clearValue: backgroundColor, loadOp: "clear", storeOp: "store" }]
+      colorAttachments: [
+        {
+          view: target,
+          clearValue: backgroundColor,
+          loadOp: "clear",
+          storeOp: "store"
+        }
+      ]
     });
     pass.setBindGroup(0, this.bindGroup);
     pass.setBindGroup(1, this.envBg);
@@ -4593,9 +4751,22 @@ var GaussianRenderer = class _GaussianRenderer {
   _colorFormat;
   sorter;
   sorterStuff = null;
-  // keep the *exact* layouts used for creating the pipelines to make fallback B/Gs compatible
   renderSorterLayout;
   sortPreLayout;
+  // reuse buffers for serialization
+  _cu = new CameraUniform();
+  _camBuf = new ArrayBuffer(68 * 4);
+  // 68 f32
+  _camF32 = new Float32Array(this._camBuf);
+  _setBuf = new ArrayBuffer(80);
+  _setDV = new DataView(this._setBuf);
+  _indirectInitBuf = new ArrayBuffer(16);
+  _indirectInitDV = new DataView(this._indirectInitBuf);
+  // frame counter for debug throttling
+  _frameIndex = 0;
+  // last-hash tracking (so we only dump bytes when payload actually changes)
+  _lastCamHash = null;
+  _lastSetHash = null;
   constructor(pipeline, cameraUB, settingsUB, preprocess, drawIndirectBuffer, drawIndirect, colorFormat, sorter, renderSorterLayout, sortPreLayout) {
     this.pipeline = pipeline;
     this.cameraUB = cameraUB;
@@ -4607,23 +4778,10 @@ var GaussianRenderer = class _GaussianRenderer {
     this.sorter = sorter;
     this.renderSorterLayout = renderSorterLayout;
     this.sortPreLayout = sortPreLayout;
-  }
-  async getVisibleInstanceCount(device) {
-    const staging = device.createBuffer({
-      label: "readback indirect",
-      size: 16,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
-    const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(this.drawIndirectBuffer, 0, staging, 0, 16);
-    device.queue.submit([enc.finish()]);
-    await staging.mapAsync(GPUMapMode.READ);
-    const dv = new DataView(staging.getMappedRange());
-    const vertexCount = dv.getUint32(0, true);
-    const instanceCount = dv.getUint32(4, true);
-    staging.unmap();
-    console.log("[indirect] vertexCount:", vertexCount, "instanceCount:", instanceCount);
-    return instanceCount;
+    this._indirectInitDV.setUint32(0, 4, true);
+    this._indirectInitDV.setUint32(4, 0, true);
+    this._indirectInitDV.setUint32(8, 0, true);
+    this._indirectInitDV.setUint32(12, 0, true);
   }
   camera() {
     return this.cameraUB;
@@ -4632,6 +4790,10 @@ var GaussianRenderer = class _GaussianRenderer {
     return this.settingsUB;
   }
   static async create(device, queue, colorFormat, shDeg, compressed) {
+    logi2(
+      "[renderer::new]",
+      `color_format=${colorFormat}, sh_deg=${shDeg}, compressed=${compressed}`
+    );
     const sorter = await GPURSSorter.create(device, queue);
     const pcRenderLayout = PointCloud.bind_group_layout_render(device);
     const renderSorterLayout = GPURSSorter.bindGroupLayoutRendering(device);
@@ -4640,7 +4802,10 @@ var GaussianRenderer = class _GaussianRenderer {
       bindGroupLayouts: [pcRenderLayout, renderSorterLayout]
     });
     const gaussianSrc = await (await fetch("./shaders/gaussian.wgsl")).text();
-    const gaussianModule = device.createShaderModule({ label: "gaussian shader", code: gaussianSrc });
+    const gaussianModule = device.createShaderModule({
+      label: "gaussian shader",
+      code: gaussianSrc
+    });
     const pipeline = device.createRenderPipeline({
       label: "render pipeline",
       layout: renderPipelineLayout,
@@ -4648,21 +4813,30 @@ var GaussianRenderer = class _GaussianRenderer {
       fragment: {
         module: gaussianModule,
         entryPoint: "fs_main",
-        targets: [{
-          format: colorFormat,
-          blend: {
-            color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
-            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
-          },
-          writeMask: GPUColorWrite.ALL
-        }]
+        targets: [
+          {
+            format: colorFormat,
+            blend: {
+              color: {
+                srcFactor: "one",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add"
+              },
+              alpha: {
+                srcFactor: "one",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add"
+              }
+            },
+            writeMask: GPUColorWrite.ALL
+          }
+        ]
       },
       primitive: { topology: "triangle-strip", frontFace: "ccw" }
     });
     const drawIndirectBuffer = device.createBuffer({
       label: "indirect draw buffer",
       size: 16,
-      // 4 * u32
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
     });
     const drawIndirectLayout = _GaussianRenderer.bindGroupLayout(device);
@@ -4672,9 +4846,26 @@ var GaussianRenderer = class _GaussianRenderer {
       entries: [{ binding: 0, resource: { buffer: drawIndirectBuffer } }]
     });
     const sortPreLayout = GPURSSorter.bindGroupLayoutPreprocess(device);
-    const preprocess = await PreprocessPipeline.create(device, shDeg, compressed, sortPreLayout);
-    const cameraUB = UniformBuffer.newDefault(device, "camera uniform buffer", 272);
-    const settingsUB = UniformBuffer.newDefault(device, "render settings uniform buffer", 80);
+    const preprocess = await PreprocessPipeline.create(
+      device,
+      shDeg,
+      compressed,
+      sortPreLayout
+    );
+    const cameraUB = UniformBuffer.newDefault(
+      device,
+      "camera uniform buffer",
+      68 * 4
+    );
+    const settingsUB = UniformBuffer.newDefault(
+      device,
+      "render settings uniform buffer",
+      80
+    );
+    logi2(
+      "[renderer::new]",
+      `buffers ready; draw_indirect.size=${drawIndirectBuffer.size} bytes`
+    );
     return new _GaussianRenderer(
       pipeline,
       cameraUB,
@@ -4688,23 +4879,32 @@ var GaussianRenderer = class _GaussianRenderer {
       sortPreLayout
     );
   }
-  /* ---------- helpers (serialization mirrors Rust struct layout) ---------- */
+  getColorFormat() {
+    return this._colorFormat;
+  }
+  static bindGroupLayout(device) {
+    return device.createBindGroupLayout({
+      label: "draw indirect",
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
+      ]
+    });
+  }
+  /* ---------- serialization (match Rust struct layout) ---------- */
   serializeCameraUniform(camera) {
-    const buf = new ArrayBuffer(272);
-    const f32 = new Float32Array(buf);
-    f32.set(camera.viewMatrix, 0);
-    f32.set(camera.viewInvMatrix, 16);
-    f32.set(camera.projMatrix, 32);
-    f32.set(camera.projInvMatrix, 48);
+    const f32 = this._camF32;
+    f32.set(mat4ColMajorToArray(camera.viewMatrix), 0);
+    f32.set(mat4ColMajorToArray(camera.viewInvMatrix), 16);
+    f32.set(mat4ColMajorToArray(camera.projMatrix), 32);
+    f32.set(mat4ColMajorToArray(camera.projInvMatrix), 48);
     f32[64] = camera.viewport[0];
     f32[65] = camera.viewport[1];
     f32[66] = camera.focal[0];
     f32[67] = camera.focal[1];
-    return new Uint8Array(buf);
+    return new Uint8Array(this._camBuf);
   }
   serializeSettingsUniform(u) {
-    const buf = new ArrayBuffer(80);
-    const dv = new DataView(buf);
+    const dv = this._setDV;
     let off = 0;
     for (let i = 0; i < 4; i++) dv.setFloat32(off + i * 4, u.clippingBoxMin[i], true);
     off += 16;
@@ -4727,68 +4927,88 @@ var GaussianRenderer = class _GaussianRenderer {
     dv.setUint32(off, 0, true);
     off += 4;
     for (let i = 0; i < 4; i++) dv.setFloat32(off + i * 4, u.sceneCenter[i] ?? 0, true);
-    return new Uint8Array(buf);
+    return new Uint8Array(this._setBuf);
   }
   writeInitialDrawIndirect(queue) {
-    const arr = new ArrayBuffer(16);
-    const dv = new DataView(arr);
-    dv.setUint32(0, 4, true);
-    dv.setUint32(4, 0, true);
-    dv.setUint32(8, 0, true);
-    dv.setUint32(12, 0, true);
-    queue.writeBuffer(this.drawIndirectBuffer, 0, arr);
-  }
-  /* ---------- public API ---------- */
-  getColorFormat() {
-    return this._colorFormat;
-  }
-  static bindGroupLayout(device) {
-    return device.createBindGroupLayout({
-      label: "draw indirect",
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
-      ]
-    });
+    queue.writeBuffer(this.drawIndirectBuffer, 0, this._indirectInitBuf);
+    logi2(
+      "[preprocess]",
+      "wrote DrawIndirectArgs { vertex_count=4, instance_count=0, first_vertex=0, first_instance=0 }"
+    );
   }
   /* ---------- core steps ---------- */
   preprocessStep(queue, pc, renderSettings) {
-    const cu = new CameraUniform();
+    const cu = this._cu;
     cu.setCamera(renderSettings.camera);
     cu.setViewport(renderSettings.viewport);
-    const focalX = renderSettings.viewport[0] / (2 * Math.tan(renderSettings.camera.projection.fovx / 2));
-    const focalY = renderSettings.viewport[1] / (2 * Math.tan(renderSettings.camera.projection.fovy / 2));
-    cu.setFocal(vec2_exports.fromValues(focalX, focalY));
+    cu.setFocal(renderSettings.camera.projection.focal(renderSettings.viewport));
+    const V = mat4ColMajorToArray(cu.viewMatrix);
+    const P = mat4ColMajorToArray(cu.projMatrix);
+    const VP = new Float32Array(16);
+    {
+      const tmp = mat4_exports.create();
+      mat4_exports.multiply(tmp, cu.projMatrix, cu.viewMatrix);
+      VP.set(tmp);
+    }
+    logi2(
+      "[preprocess]",
+      `viewport=${cu.viewport[0]}x${cu.viewport[1]}, focal=(${cu.focal[0]},${cu.focal[1]})`
+    );
+    logi2("[preprocess]", `view=${fmtF32Slice(V)}`);
+    logi2("[preprocess]", `proj=${fmtF32Slice(P)}`);
+    logi2("[preprocess]", `viewProj=${fmtF32Slice(VP)}`);
     const cameraBytes = this.serializeCameraUniform(cu);
+    const camHash = hashBytesU64(cameraBytes);
+    logi2(
+      "[preprocess]",
+      `CameraUniform.size=${cameraBytes.byteLength} hash=${camHash}`
+    );
+    if (this._lastCamHash !== camHash) {
+      dumpU32("[preprocess] CameraUniform.bytes(u32le)=", cameraBytes);
+      this._lastCamHash = camHash;
+    }
     const su = SplattingArgsUniform.fromArgsAndPc(renderSettings, pc);
     const settingsBytes = this.serializeSettingsUniform(su);
-    this.cameraUB.setData(cameraBytes);
+    const setHash = hashBytesU64(settingsBytes);
+    logi2(
+      "[preprocess]",
+      `SplattingArgsUniform.size=${settingsBytes.byteLength} hash=${setHash}`
+    );
+    if (this._lastSetHash !== setHash) {
+      dumpU32("[preprocess] SplattingArgsUniform.bytes(u32le)=", settingsBytes);
+      this._lastSetHash = setHash;
+    }
+    this.cameraUB.setData(new Uint8Array(cameraBytes));
     this.cameraUB.sync(queue);
-    this.settingsUB.setData(settingsBytes);
+    this.settingsUB.setData(new Uint8Array(settingsBytes));
     this.settingsUB.sync(queue);
     this.writeInitialDrawIndirect(queue);
+    globalThis.__LOGGING_ENABLED__ = false;
     return [this.cameraUB.bind_group(), this.settingsUB.bind_group()];
   }
   prepare(encoder, device, queue, pc, renderSettings, stopwatch) {
     if (!this.sorterStuff || this.sorterStuff.numPoints !== pc.numPoints()) {
-      console.debug(`created sort buffers for ${pc.numPoints()} points`);
       this.sorterStuff = this.sorter.createSortStuff(device, pc.numPoints());
+      const ss = this.sorterStuff;
+      logi2(
+        "[prepare]",
+        `sorter buffers (num_points=${ss.numPoints}): uni.size=${ss.sorterUni.size} dis.size=${ss.sorterDis.size}`
+      );
     }
     GPURSSorter.recordResetIndirectBuffer(
       this.sorterStuff.sorterDis,
       this.sorterStuff.sorterUni,
       queue
     );
+    logi2("[prepare]", "reset indirect & uniform sorter buffers");
     if (stopwatch) stopwatch.start(encoder, "preprocess");
     const [cameraBG, settingsBG] = this.preprocessStep(queue, pc, renderSettings);
     this.preprocess.run(
       encoder,
       pc,
       cameraBG,
-      // group(0)
       this.sorterStuff.sorterBgPre,
-      // group(2)
       settingsBG
-      // group(3)
     );
     if (stopwatch) stopwatch.stop(encoder, "preprocess");
     if (stopwatch) stopwatch.start(encoder, "sorting");
@@ -4798,23 +5018,29 @@ var GaussianRenderer = class _GaussianRenderer {
       encoder
     );
     if (stopwatch) stopwatch.stop(encoder, "sorting");
-    encoder.copyBufferToBuffer(
-      this.sorterStuff.sorterUni,
-      0,
-      this.drawIndirectBuffer,
-      4,
-      4
-    );
-    {
-      const tmp = device.createBuffer({
-        label: "debug instance_count",
-        size: 4,
-        usage: GPUBufferUsage.COPY_SRC,
-        mappedAtCreation: true
-      });
-      new DataView(tmp.getMappedRange()).setUint32(0, pc.numPoints() >>> 0, true);
-      tmp.unmap();
-      encoder.copyBufferToBuffer(tmp, 0, this.drawIndirectBuffer, 4, 4);
+    encoder.copyBufferToBuffer(this.sorterStuff.sorterUni, 0, this.drawIndirectBuffer, 4, 4);
+    logi2("[prepare]", "copied visible instance_count into draw_indirect_buffer[+4]");
+    this._frameIndex++;
+    if (DEBUG_READBACK_EVERY_N_FRAMES > 0 && this._frameIndex % DEBUG_READBACK_EVERY_N_FRAMES === 0) {
+      (async () => {
+        try {
+          const idab = await readbackBuffer(device, this.drawIndirectBuffer, 16);
+          const id = new Uint32Array(idab);
+          const visab = await readbackBuffer(device, this.sorterStuff.sorterUni, 4);
+          const vis = new Uint32Array(visab)[0] >>> 0;
+          if (loggingEnabled3()) {
+            console.log("[indirect]", {
+              vertexCount: id[0] >>> 0,
+              instanceCount: id[1] >>> 0,
+              firstVertex: id[2] >>> 0,
+              firstInstance: id[3] >>> 0
+            });
+            console.log("[visibleCount]", vis);
+          }
+        } catch (e) {
+          if (loggingEnabled3()) console.warn("[debug-readback] failed:", e);
+        }
+      })();
     }
   }
   render(renderPass, pc) {
@@ -4826,6 +5052,10 @@ var GaussianRenderer = class _GaussianRenderer {
 };
 
 // src/controller.ts
+var DEBUG_INPUT = false;
+var dlog = (...args) => {
+  if (DEBUG_INPUT) console.debug("[controller]", ...args);
+};
 var CameraController = class {
   center;
   up;
@@ -4899,6 +5129,7 @@ var CameraController = class {
         processed = false;
     }
     this.user_inptut = processed;
+    if (processed) dlog("process_keyboard", key, { pressed, amount: this.amount, rotation: this.rotation });
     return processed;
   }
   /** mouse_dx/mouse_dy in pixels (same semantics as Rust). */
@@ -4907,16 +5138,19 @@ var CameraController = class {
       this.rotation[0] += mouse_dx;
       this.rotation[1] += mouse_dy;
       this.user_inptut = true;
+      dlog("process_mouse rotate", { dx: mouse_dx, dy: mouse_dy, rotation: this.rotation });
     }
     if (this.right_mouse_pressed) {
       this.shift[1] += -mouse_dx;
       this.shift[0] += mouse_dy;
       this.user_inptut = true;
+      dlog("process_mouse pan", { dx: mouse_dx, dy: mouse_dy, shift: this.shift });
     }
   }
   process_scroll(dy) {
     this.scroll += -dy;
     this.user_inptut = true;
+    dlog("process_scroll", { dy, scroll: this.scroll });
   }
   /** Align controller to the camera’s current line of sight and adjust up. */
   reset_to_camera(camera) {
@@ -4930,6 +5164,7 @@ var CameraController = class {
       const newUp = vec3_exports.normalize(vec3_exports.create(), vec3_exports.subtract(vec3_exports.create(), this.up, proj));
       this.up = newUp;
     }
+    dlog("reset_to_camera", { center: this.center, up: this.up });
   }
   /**
    * Update camera given dt in seconds (1:1 with Duration semantics).
@@ -4941,35 +5176,32 @@ var CameraController = class {
     const distance4 = Math.max(1e-12, vec3_exports.length(dir));
     const newDist = Math.exp(Math.log(distance4) + this.scroll * dt * 10 * this.speed);
     const dirNorm = vec3_exports.scale(vec3_exports.create(), vec3_exports.normalize(vec3_exports.create(), dir), newDist);
-    const invQ = quat_exports.invert(quat_exports.create(), camera.rotation);
-    const x_axis = vec3_exports.transformQuat(vec3_exports.create(), vec3_exports.fromValues(1, 0, 0), invQ);
-    const y_axis = this.up ? vec3_exports.clone(this.up) : vec3_exports.transformQuat(vec3_exports.create(), vec3_exports.fromValues(0, 1, 0), invQ);
-    const z_axis = vec3_exports.transformQuat(vec3_exports.create(), vec3_exports.fromValues(0, 0, 1), invQ);
+    const worldUp = this.up ? normalizeSafe(this.up) : vec3_exports.fromValues(0, 1, 0);
+    let x_axis = vec3_exports.cross(vec3_exports.create(), worldUp, dirNorm);
+    x_axis = normalizeSafe(x_axis);
+    if (vec3_exports.length(x_axis) < 1e-6) {
+      x_axis = vec3_exports.fromValues(1, 0, 0);
+    }
+    const y_axis = worldUp;
     const panScale = dt * this.speed * 0.1 * distance4;
     const pan = vec3_exports.create();
-    const sx = vec3_exports.scale(vec3_exports.create(), x_axis, this.shift[1] * panScale);
-    const sy = vec3_exports.scale(vec3_exports.create(), y_axis, -this.shift[0] * panScale);
-    vec3_exports.add(pan, sx, sy);
+    vec3_exports.scaleAndAdd(pan, pan, x_axis, -this.shift[1] * panScale);
+    vec3_exports.scaleAndAdd(pan, pan, y_axis, -this.shift[0] * panScale);
     vec3_exports.add(this.center, this.center, pan);
     vec3_exports.add(camera.position, camera.position, pan);
-    let theta = this.rotation[0] * dt * this.sensitivity;
-    let phi = -this.rotation[1] * dt * this.sensitivity;
-    let eta = 0;
-    if (this.alt_pressed) {
-      eta = -this.rotation[1] * dt * this.sensitivity;
-      theta = 0;
-      phi = 0;
-    }
-    const qTheta = quat_exports.setAxisAngle(quat_exports.create(), normalizeSafe(y_axis), theta);
-    const qPhi = quat_exports.setAxisAngle(quat_exports.create(), normalizeSafe(x_axis), phi);
-    const qEta = quat_exports.setAxisAngle(quat_exports.create(), normalizeSafe(z_axis), eta);
-    const rot = quat_exports.multiply(quat_exports.create(), quat_exports.multiply(quat_exports.create(), qTheta, qPhi), qEta);
+    const yaw = this.rotation[0] * dt * this.sensitivity;
+    const pitch = this.rotation[1] * dt * this.sensitivity;
+    let right = vec3_exports.clone(x_axis);
+    if (vec3_exports.length(right) < 1e-6) right = vec3_exports.fromValues(1, 0, 0);
+    const qYaw = quat_exports.setAxisAngle(quat_exports.create(), worldUp, yaw);
+    const qPitch = quat_exports.setAxisAngle(quat_exports.create(), right, pitch);
+    const rot = quat_exports.multiply(quat_exports.create(), qYaw, qPitch);
     const new_dir = vec3_exports.transformQuat(vec3_exports.create(), dirNorm, rot);
-    if (angle_short(y_axis, new_dir) < 0.1) {
+    if (angle_short(worldUp, new_dir) < 0.1) {
       vec3_exports.copy(new_dir, dirNorm);
     }
     vec3_exports.add(camera.position, this.center, new_dir);
-    camera.rotation = lookRotation(vec3_exports.scale(vec3_exports.create(), new_dir, -1), y_axis);
+    camera.rotation = lookRotation(vec3_exports.scale(vec3_exports.create(), new_dir, -1), worldUp);
     let decay = Math.pow(0.8, dt * 60);
     if (decay < 1e-4) decay = 0;
     vec3_exports.scale(this.rotation, this.rotation, decay);
@@ -4979,6 +5211,7 @@ var CameraController = class {
     this.scroll *= decay;
     if (Math.abs(this.scroll) < 1e-4) this.scroll = 0;
     this.user_inptut = false;
+    dlog("update_camera (orbit, no-roll)", { dt, yaw, pitch, center: this.center, camPos: camera.position });
   }
 };
 function closest_point(orig, dir, point) {
@@ -5129,17 +5362,31 @@ function sh_deg_from_num_coefs(n) {
   return Number.isInteger(sqrt) ? (sqrt | 0) - 1 : null;
 }
 function build_cov(rotation, scale7) {
-  const R = mat3_exports.create();
-  mat3_exports.fromQuat(R, rotation);
-  const S = mat3_exports.create();
-  mat3_exports.fromScaling(S, scale7);
-  const L = mat3_exports.create();
-  mat3_exports.multiply(L, R, S);
-  const Lt = mat3_exports.create();
-  mat3_exports.transpose(Lt, L);
-  const M = mat3_exports.create();
-  mat3_exports.multiply(M, L, Lt);
-  return [M[0], M[1], M[2], M[4], M[5], M[8]];
+  const x = rotation[0], y = rotation[1], z = rotation[2], w = rotation[3];
+  const sx = scale7[0], sy = scale7[1], sz = scale7[2];
+  const d0 = sx * sx, d1 = sy * sy, d2 = sz * sz;
+  const xx = x * x, yy = y * y, zz = z * z;
+  const xy = x * y, xz = x * z, yz = y * z;
+  const wx = w * x, wy = w * y, wz = w * z;
+  const r00 = 1 - 2 * (yy + zz);
+  const r01 = 2 * (xy - wz);
+  const r02 = 2 * (xz + wy);
+  const r10 = 2 * (xy + wz);
+  const r11 = 1 - 2 * (xx + zz);
+  const r12 = 2 * (yz - wx);
+  const r20 = 2 * (xz - wy);
+  const r21 = 2 * (yz + wx);
+  const r22 = 1 - 2 * (xx + yy);
+  const rd00 = r00 * d0, rd01 = r01 * d1, rd02 = r02 * d2;
+  const rd10 = r10 * d0, rd11 = r11 * d1, rd12 = r12 * d2;
+  const rd20 = r20 * d0, rd21 = r21 * d1, rd22 = r22 * d2;
+  const m00 = rd00 * r00 + rd01 * r01 + rd02 * r02;
+  const m01 = rd00 * r10 + rd01 * r11 + rd02 * r12;
+  const m02 = rd00 * r20 + rd01 * r21 + rd02 * r22;
+  const m11 = rd10 * r10 + rd11 * r11 + rd12 * r12;
+  const m12 = rd10 * r20 + rd11 * r21 + rd12 * r22;
+  const m22 = rd20 * r20 + rd21 * r21 + rd22 * r22;
+  return [m00, m01, m02, m11, m12, m22];
 }
 function sigmoid(x) {
   return x >= 0 ? 1 / (1 + Math.exp(-x)) : Math.exp(x) / (1 + Math.exp(x));
@@ -5148,6 +5395,11 @@ var buildCov = build_cov;
 var shDegFromNumCoefs = sh_deg_from_num_coefs;
 
 // src/io/ply.ts
+var DEBUG_MAX_SPLATS = null;
+var DEBUG_LOG_PLY_SAMPLE0 = true;
+var __PLY_SAMPLE_LOGGED__ = false;
+var qScratch = quat_exports.create();
+var scaleScratch = vec3_exports.create();
 function parsePlyHeader(data) {
   const u8 = new Uint8Array(data);
   const needle = utf8Bytes("end_header");
@@ -5222,6 +5474,9 @@ var PlyReader = class _PlyReader {
   mip_splatting;
   kernel_size;
   background_color;
+  // precomputed once (avoids per-splat allocation)
+  numCoefs;
+  restScratch;
   constructor(reader) {
     this.header = parsePlyHeader(reader);
     this.dv = new DataView(reader);
@@ -5232,7 +5487,14 @@ var PlyReader = class _PlyReader {
       throw new Error(`number of sh coefficients ${numShCoefs} cannot be mapped to sh degree`);
     }
     this.sh_deg = deg;
-    this.num_points = this.header.vertexCount;
+    this.numCoefs = (this.sh_deg + 1) * (this.sh_deg + 1);
+    this.restScratch = new Float32Array(Math.max(0, (this.numCoefs - 1) * 3));
+    const fileCount = this.header.vertexCount;
+    const clamped = DEBUG_MAX_SPLATS != null && DEBUG_MAX_SPLATS > 0 ? Math.min(fileCount, DEBUG_MAX_SPLATS) : fileCount;
+    if (clamped !== fileCount) {
+      console.log(`[ply] DEBUG: clamping splats ${fileCount} -> ${clamped}`);
+    }
+    this.num_points = clamped;
     this.mip_splatting = parseBoolFromComments(this.header.comments, "mip");
     this.kernel_size = parseNumberFromComments(this.header.comments, "kernel_size");
     this.background_color = parseRGBFromComments(this.header.comments, "background_color");
@@ -5291,32 +5553,48 @@ var PlyReader = class _PlyReader {
     sh[0][0] = this.readF32(littleEndian);
     sh[0][1] = this.readF32(littleEndian);
     sh[0][2] = this.readF32(littleEndian);
-    const numCoefs = (this.sh_deg + 1) * (this.sh_deg + 1);
-    const restCount = (numCoefs - 1) * 3;
-    const rest = new Float32Array(restCount);
+    const restCount = (this.numCoefs - 1) * 3;
+    const rest = this.restScratch;
     for (let i = 0; i < restCount; i++) rest[i] = this.readF32(littleEndian);
-    for (let i = 0; i < numCoefs - 1; i++) {
-      for (let j = 0; j < 3; j++) {
-        sh[i + 1][j] = rest[j * (numCoefs - 1) + i];
-      }
+    const stride = this.numCoefs - 1;
+    for (let i = 0; i < this.numCoefs - 1; i++) {
+      sh[i + 1][0] = rest[0 * stride + i];
+      sh[i + 1][1] = rest[1 * stride + i];
+      sh[i + 1][2] = rest[2 * stride + i];
     }
     const opacity = sigmoid(this.readF32(littleEndian));
     const s1 = Math.exp(this.readF32(littleEndian));
     const s2 = Math.exp(this.readF32(littleEndian));
     const s3 = Math.exp(this.readF32(littleEndian));
-    const scaleV = vec3_exports.fromValues(s1, s2, s3);
+    scaleScratch[0] = s1;
+    scaleScratch[1] = s2;
+    scaleScratch[2] = s3;
     const r0 = this.readF32(littleEndian);
     const r1 = this.readF32(littleEndian);
     const r2 = this.readF32(littleEndian);
     const r3 = this.readF32(littleEndian);
-    const q = quat_exports.fromValues(r1, r2, r3, r0);
-    quat_exports.normalize(q, q);
-    const cov = buildCov(q, scaleV);
+    qScratch[0] = r1;
+    qScratch[1] = r2;
+    qScratch[2] = r3;
+    qScratch[3] = r0;
+    quat_exports.normalize(qScratch, qScratch);
+    const cov = buildCov(qScratch, scaleScratch);
     const g = {
       xyz: { x: px, y: py, z: pz },
       opacity,
       cov: [cov[0], cov[1], cov[2], cov[3], cov[4], cov[5]]
     };
+    if (DEBUG_LOG_PLY_SAMPLE0 && !__PLY_SAMPLE_LOGGED__) {
+      __PLY_SAMPLE_LOGGED__ = true;
+      console.log("[ply::sample0] pos", [px, py, pz]);
+      console.log("[ply::sample0] opacity", opacity);
+      console.log("[ply::sample0] scale(exp)", [s1, s2, s3]);
+      console.log("[ply::sample0] quat(x,y,z,w) normalized", [qScratch[0], qScratch[1], qScratch[2], qScratch[3]]);
+      console.log("[ply::sample0] cov[0..5]", [cov[0], cov[1], cov[2], cov[3], cov[4], cov[5]]);
+      console.log("[ply::sample0] SH[0]", [sh[0][0], sh[0][1], sh[0][2]]);
+      if (this.numCoefs > 1) console.log("[ply::sample0] SH[1]", [sh[1][0], sh[1][1], sh[1][2]]);
+      if (this.numCoefs > 2) console.log("[ply::sample0] SH[2]", [sh[2][0], sh[2][1], sh[2][2]]);
+    }
     return { g, s: sh };
   }
   readF32(littleEndian) {
@@ -5510,25 +5788,24 @@ function startsWith(buf, sig) {
   for (let i = 0; i < sig.length; i++) if (buf[i] !== sig[i]) return false;
   return true;
 }
+var __f16_scratch_f32 = new Float32Array(1);
+var __f16_scratch_u32 = new Uint32Array(__f16_scratch_f32.buffer);
 function f32_to_f16(val) {
-  const f32 = new Float32Array(1);
-  const u32 = new Uint32Array(f32.buffer);
-  f32[0] = val;
-  const x = u32[0];
+  __f16_scratch_f32[0] = val;
+  const x = __f16_scratch_u32[0];
   const sign = x >>> 16 & 32768;
   let exp2 = x >>> 23 & 255;
   let mant = x & 8388607;
   if (exp2 === 255) {
-    return sign | 31744 | (mant ? 1 : 0);
+    const isNan = mant !== 0;
+    return sign | 31744 | (isNan ? 512 : 0);
   }
   if (exp2 === 0) {
     return sign;
   }
   let e = exp2 - 112;
   if (e <= 0) {
-    if (e < -10) {
-      return sign;
-    }
+    if (e < -10) return sign;
     mant = (mant | 8388608) >>> 1 - e;
     if (mant & 4096) mant += 8192;
     return sign | mant >>> 13;
@@ -5546,44 +5823,37 @@ function f32_to_f16(val) {
   }
   return sign | e << 10 | mant >>> 13 & 1023;
 }
-function writeF16(view, byteOffset, v) {
-  view.setUint16(byteOffset, f32_to_f16(v), true);
-}
 function packGaussiansF16(gaussians) {
-  const BYTES_PER = 20;
-  const buf = new ArrayBuffer(gaussians.length * BYTES_PER);
-  const view = new DataView(buf);
-  let off = 0;
+  const WORDS_PER = 10;
+  const u16 = new Uint16Array(gaussians.length * WORDS_PER);
+  let i = 0;
   for (const g of gaussians) {
-    writeF16(view, off + 0, g.xyz.x);
-    writeF16(view, off + 2, g.xyz.y);
-    writeF16(view, off + 4, g.xyz.z);
-    writeF16(view, off + 6, g.opacity);
-    writeF16(view, off + 8, g.cov[0]);
-    writeF16(view, off + 10, g.cov[1]);
-    writeF16(view, off + 12, g.cov[2]);
-    writeF16(view, off + 14, g.cov[3]);
-    writeF16(view, off + 16, g.cov[4]);
-    writeF16(view, off + 18, g.cov[5]);
-    off += BYTES_PER;
+    u16[i++] = f32_to_f16(g.xyz.x);
+    u16[i++] = f32_to_f16(g.xyz.y);
+    u16[i++] = f32_to_f16(g.xyz.z);
+    u16[i++] = f32_to_f16(g.opacity);
+    u16[i++] = f32_to_f16(g.cov[0]);
+    u16[i++] = f32_to_f16(g.cov[1]);
+    u16[i++] = f32_to_f16(g.cov[2]);
+    u16[i++] = f32_to_f16(g.cov[3]);
+    u16[i++] = f32_to_f16(g.cov[4]);
+    u16[i++] = f32_to_f16(g.cov[5]);
   }
-  return new Uint8Array(buf);
+  return new Uint8Array(u16.buffer);
 }
 function packShCoefsF16(sh) {
-  const BYTES_PER_POINT = 16 * 3 * 2;
-  const buf = new ArrayBuffer(sh.length * BYTES_PER_POINT);
-  const view = new DataView(buf);
-  let off = 0;
+  const WORDS_PER_POINT = 16 * 3;
+  const u16 = new Uint16Array(sh.length * WORDS_PER_POINT);
+  let i = 0;
   for (const block of sh) {
-    for (let i = 0; i < 16; i++) {
-      const [r, g, b] = block[i];
-      writeF16(view, off + 0, r);
-      writeF16(view, off + 2, g);
-      writeF16(view, off + 4, b);
-      off += 6;
+    for (let k = 0; k < 16; k++) {
+      const t = block[k];
+      u16[i++] = f32_to_f16(t[0]);
+      u16[i++] = f32_to_f16(t[1]);
+      u16[i++] = f32_to_f16(t[2]);
     }
   }
-  return new Uint8Array(buf);
+  return new Uint8Array(u16.buffer);
 }
 function packGaussiansCompressed(g) {
   const BYTES_PER = 16;
@@ -5591,9 +5861,9 @@ function packGaussiansCompressed(g) {
   const view = new DataView(buf);
   let off = 0;
   for (const v of g) {
-    writeF16(view, off + 0, v.xyz.x);
-    writeF16(view, off + 2, v.xyz.y);
-    writeF16(view, off + 4, v.xyz.z);
+    view.setUint16(off + 0, f32_to_f16(v.xyz.x), true);
+    view.setUint16(off + 2, f32_to_f16(v.xyz.y), true);
+    view.setUint16(off + 4, f32_to_f16(v.xyz.z), true);
     view.setInt8(off + 6, v.opacity);
     view.setInt8(off + 7, v.scale_factor);
     view.setUint32(off + 8, v.geometry_idx, true);
@@ -5768,7 +6038,12 @@ var SceneCamera = class _SceneCamera {
     }
     quat_exports.normalize(q, q);
     const pos = vec3_exports.fromValues(this.position[0], this.position[1], this.position[2]);
-    const proj = new PerspectiveProjection(fovx, fovy, 0.01, 100);
+    const proj = PerspectiveProjection.new(
+      vec2_exports.fromValues(this.width, this.height),
+      vec2_exports.fromValues(fovx, fovy),
+      0.01,
+      100
+    );
     return new PerspectiveCamera(pos, q, proj);
   }
   hash() {
@@ -5889,6 +6164,7 @@ var Scene = class _Scene {
 var v3 = (p) => vec3_exports.fromValues(p.x, p.y, p.z);
 var near = (a, b, eps = 1e-4) => Math.abs(a - b) <= eps;
 var nearVec3 = (a, b, eps = 1e-4) => near(a[0], b[0], eps) && near(a[1], b[1], eps) && near(a[2], b[2], eps);
+var nearQuat = (a, b, eps = 1e-4) => near(a[0], b[0], eps) && near(a[1], b[1], eps) && near(a[2], b[2], eps) && near(a[3], b[3], eps);
 var EguiWGPU = class {
   constructor(_device, _fmt, _canvas) {
   }
@@ -5925,10 +6201,8 @@ var WGPUContext = class _WGPUContext {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error("No WebGPU adapter");
     const device = await adapter.requestDevice({
-      requiredLimits: {
-        maxComputeWorkgroupStorageSize: 1 << 15
-        // 32768
-      }
+      requiredLimits: { maxComputeWorkgroupStorageSize: 1 << 15 }
+      // 32768
     });
     const ctx = new _WGPUContext();
     ctx.adapter = adapter;
@@ -5958,11 +6232,19 @@ var WindowContext = class _WindowContext {
   splatting_args;
   saved_cameras = [];
   stopwatch = null;
+  // --------- PERF: incremental change tracking instead of JSON stringify -------
+  _lastCamPos = vec3_exports.create();
+  _lastCamRot = quat_exports.create();
+  _lastWalltime = 0;
+  _changed = true;
+  // force first frame
+  // ---------------------------------------------------------------------------
   static async new(window2, pc_file, render_config) {
     const state = new _WindowContext();
+    const rect = window2.getBoundingClientRect();
     const size = {
-      width: window2.width || 800,
-      height: window2.height || 600
+      width: Math.max(1, window2.width || Math.floor(rect.width) || 800),
+      height: Math.max(1, window2.height || Math.floor(rect.height) || 600)
     };
     state.window = window2;
     state.scale_factor = window2.ownerDocument?.defaultView?.devicePixelRatio ?? 1;
@@ -5974,7 +6256,8 @@ var WindowContext = class _WindowContext {
     surface.configure({
       device: wgpu_context.device,
       format: surface_format,
-      alphaMode: "opaque"
+      alphaMode: "opaque",
+      viewFormats: [deSRGB(surface_format)]
     });
     state.wgpu_context = wgpu_context;
     state.surface = surface;
@@ -5988,7 +6271,6 @@ var WindowContext = class _WindowContext {
     };
     const pc_raw = await GenericGaussianPointCloud?.load?.(pc_file) ?? pc_file;
     state.pc = await PointCloud.new(wgpu_context.device, pc_raw);
-    state.pc.debugLogFirstGaussian?.();
     state.renderer = await GaussianRenderer.create(
       wgpu_context.device,
       wgpu_context.queue,
@@ -5998,11 +6280,20 @@ var WindowContext = class _WindowContext {
     );
     const aabb = state.pc.bbox();
     const aspect = size.width / Math.max(1, size.height);
-    const c0 = state.pc.center();
+    const c0v = aabb.center();
+    const c0 = vec3_exports.fromValues(c0v.x, c0v.y, c0v.z);
     const r = aabb.radius();
-    const eyeTuple = vec3_exports.fromValues(c0.x - r * 0.5, c0.y - r * 0.5, c0.z - r * 0.5);
+    const eyeTuple = vec3_exports.fromValues(c0[0] - r * 0.5, c0[1] - r * 0.5, c0[2] - r * 0.5);
     const rot = quat_exports.create();
-    const proj = new PerspectiveProjection(size.width, size.height, 45, 0.01, 1e3);
+    const deg2rad = (d) => d * Math.PI / 180;
+    const fovx = deg2rad(45);
+    const fovy = deg2rad(45 / Math.max(1e-6, aspect));
+    const proj = PerspectiveProjection.new(
+      vec2_exports.fromValues(size.width, size.height),
+      vec2_exports.fromValues(fovx, fovy),
+      0.01,
+      1e3
+    );
     const view_camera = new PerspectiveCamera(eyeTuple, rot, proj);
     const controller = new CameraController(0.1, 0.05);
     const c = state.pc.center();
@@ -6032,6 +6323,9 @@ var WindowContext = class _WindowContext {
       backgroundColor: { r: 0, g: 0, b: 0, a: 1 },
       resolution: vec2_exports.fromValues(size.width, size.height)
     };
+    vec3_exports.copy(state._lastCamPos, state.splatting_args.camera.position);
+    quat_exports.copy(state._lastCamRot, state.splatting_args.camera.rotation);
+    state._lastWalltime = state.splatting_args.walltime;
     return state;
   }
   reload() {
@@ -6048,12 +6342,14 @@ var WindowContext = class _WindowContext {
       this.surface.configure({
         device: this.wgpu_context.device,
         format: this.config.format,
-        alphaMode: this.config.alpha_mode
+        alphaMode: this.config.alpha_mode,
+        viewFormats: this.config.view_formats
       });
       this.display.resize(this.wgpu_context.device, new_size.width, new_size.height);
       this.splatting_args.camera.projection.resize(new_size.width, new_size.height);
-      this.splatting_args.viewport = vec2_exports.fromValues(new_size.width, new_size.height);
-      this.splatting_args.camera.projection.resize(new_size.width, new_size.height);
+      this.splatting_args.viewport[0] = new_size.width;
+      this.splatting_args.viewport[1] = new_size.height;
+      this._changed = true;
     }
     if (scale_factor !== void 0 && scale_factor > 0) {
       this.scale_factor = scale_factor;
@@ -6098,6 +6394,14 @@ var WindowContext = class _WindowContext {
     }
     const aabb = this.pc.bbox();
     this.splatting_args.camera.fit_near_far(aabb);
+    const pos = this.splatting_args.camera.position;
+    const rot = this.splatting_args.camera.rotation;
+    if (!nearVec3(this._lastCamPos, pos) || !nearQuat(this._lastCamRot, rot) || this.splatting_args.walltime !== this._lastWalltime) {
+      vec3_exports.copy(this._lastCamPos, pos);
+      quat_exports.copy(this._lastCamRot, rot);
+      this._lastWalltime = this.splatting_args.walltime;
+      this._changed = true;
+    }
   }
   render(redraw_scene, shapes) {
     this.stopwatch?.reset();
@@ -6121,7 +6425,7 @@ var WindowContext = class _WindowContext {
     let ui_state = null;
     if (shapes) {
       ui_state = this.ui_renderer.prepare(
-        { width: texture.width ?? this.config.width, height: texture.height ?? this.config.height },
+        { width: this.config.width, height: this.config.height },
         this.scale_factor,
         this.wgpu_context.device,
         this.wgpu_context.queue,
@@ -6164,16 +6468,13 @@ var WindowContext = class _WindowContext {
     }
     if (ui_state) this.ui_renderer.cleanup(ui_state);
     this.wgpu_context.queue.submit([encoder.finish()]);
-    texture.present?.();
-    if (redraw_scene) {
-      void this.renderer.getVisibleInstanceCount(this.wgpu_context.device).then((n) => {
-        console.log("[indirect] instanceCount (post-submit):", n);
-      });
-    }
-    this.splatting_args.resolution = vec2_exports.fromValues(this.config.width, this.config.height);
+    this.splatting_args.resolution[0] = this.config.width;
+    this.splatting_args.resolution[1] = this.config.height;
+    this._changed = false;
   }
   set_scene(scene) {
-    this.splatting_args.sceneExtend = this.pc.bbox().radius();
+    const extend = scene.extend ? scene.extend() : this.pc.bbox().radius();
+    this.splatting_args.sceneExtend = extend;
     const n = scene.numCameras();
     let acc = { x: 0, y: 0, z: 0 };
     let cnt = 0;
@@ -6197,56 +6498,44 @@ var WindowContext = class _WindowContext {
       }
       this.saved_cameras = arr;
     }
+    this._changed = true;
+  }
+  // NEW: parity helper to jump to a scene camera (no animation for simplicity)
+  set_scene_camera(i) {
+    if (!this.scene) return;
+    this.current_view = i;
+    const cam = this.scene.camera(i);
+    if (!cam) return;
+    const anyCam = cam;
+    if (typeof anyCam.toPerspective === "function") {
+      const pc2 = anyCam.toPerspective();
+      this.update_camera(pc2);
+      return;
+    }
+    const pos = Array.isArray(cam.position) ? vec3_exports.fromValues(cam.position[0], cam.position[1], cam.position[2]) : v3(cam.position);
+    const rot = Array.isArray(cam.rotation) ? quat_exports.fromValues(cam.rotation[0], cam.rotation[1], cam.rotation[2], cam.rotation[3]) : cam.rotation;
+    const proj = this.splatting_args.camera.projection;
+    const pc = new PerspectiveCamera(pos, rot, proj);
+    this.update_camera(pc);
   }
   async set_env_map(_path) {
     this.splatting_args.showEnvMap = true;
+    this._changed = true;
   }
-  /*private start_tracking_shot(): void {
-    if (this.saved_cameras.length > 1) {
-      const shot = TrackingShot.from_cameras(this.saved_cameras.slice() as unknown as PerspectiveCamera[]);
-      const a: Animation<PerspectiveCamera> = new Animation<PerspectiveCamera>(
-        this.saved_cameras.length * 2.0,
-        true,
-        shot as unknown as PerspectiveCamera
-      );
-      this.animation = [a, true];
-    }
-  }*/
   cancle_animation() {
     this.animation = null;
     this.controller.reset_to_camera(this.splatting_args.camera);
+    this._changed = true;
   }
   stop_animation() {
     if (this.animation) this.animation[1] = false;
     this.controller.reset_to_camera(this.splatting_args.camera);
+    this._changed = true;
   }
-  /*private set_scene_camera(i: number): void {
-    if (this.scene) {
-      this.current_view = i;
-      const camera = this.scene.camera(i);
-      if (camera) {
-        this.set_camera(camera, 0.2);
-      } else {
-        console.error(`camera ${i} not found`);
-      }
-    }
-  }*/
-  /*public set_camera(camera: PerspectiveCamera | SceneCamera, animation_duration: number): void {
-    const target: PerspectiveCamera = (camera as any).toPerspective ? (camera as any).toPerspective() : (camera as PerspectiveCamera);
-    if (animation_duration <= 0) {
-      this.update_camera(target);
-    } else {
-      const a: Animation<PerspectiveCamera> = new Animation<PerspectiveCamera>(
-        animation_duration,
-        false,
-        new Transition(this.splatting_args.camera, target, smoothstep) as unknown as PerspectiveCamera
-      );
-      this.animation = [a, true];
-    }
-  }*/
   update_camera(camera) {
     this.splatting_args.camera = camera;
     this.splatting_args.camera.projection.resize(this.config.width, this.config.height);
+    this._changed = true;
   }
   save_view() {
     const sceneArr = [];
@@ -6270,26 +6559,163 @@ var WindowContext = class _WindowContext {
 function smoothstep(x) {
   return x * x * (3 - 2 * x);
 }
-async function open_window(file, scene_file, config, pointcloud_file_path, scene_file_path) {
+function bind_input(canvas, controller) {
+  if (!canvas.hasAttribute("tabindex")) canvas.tabIndex = 0;
+  let pressedPointerId = null;
+  const DEBUG = true;
+  const log = (...args) => {
+    if (DEBUG) console.debug("[input]", ...args);
+  };
+  const mapCode = (code) => {
+    switch (code) {
+      case "KeyW":
+      case "KeyS":
+      case "KeyA":
+      case "KeyD":
+      case "ArrowUp":
+      case "ArrowDown":
+      case "ArrowLeft":
+      case "ArrowRight":
+      case "KeyQ":
+      case "KeyE":
+      case "Space":
+      case "ShiftLeft":
+        return code;
+      default:
+        return void 0;
+    }
+  };
+  const updateAlt = (e) => {
+    controller.alt_pressed = !!e.altKey;
+  };
+  const onKeyDown = (e) => {
+    updateAlt(e);
+    const code = mapCode(e.code);
+    if (!code) return;
+    if (controller.process_keyboard(code, true)) {
+      log("keydown", code);
+      e.preventDefault();
+    }
+  };
+  const onKeyUp = (e) => {
+    updateAlt(e);
+    const code = mapCode(e.code);
+    if (!code) return;
+    if (controller.process_keyboard(code, false)) {
+      log("keyup", code);
+      e.preventDefault();
+    }
+  };
+  const onPointerDown = (e) => {
+    updateAlt(e);
+    canvas.focus();
+    pressedPointerId = e.pointerId;
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+    }
+    if (e.button === 0) controller.left_mouse_pressed = true;
+    if (e.button === 2) controller.right_mouse_pressed = true;
+    log("pointerdown", e.button, "alt=", controller.alt_pressed);
+    e.preventDefault();
+  };
+  const onPointerMove = (e) => {
+    updateAlt(e);
+    const dx = e.movementX ?? 0;
+    const dy = e.movementY ?? 0;
+    if (controller.left_mouse_pressed || controller.right_mouse_pressed) {
+      controller.process_mouse(dx, dy);
+      log("pointermove", dx, dy);
+      e.preventDefault();
+    }
+  };
+  const onPointerUp = (e) => {
+    updateAlt(e);
+    if (pressedPointerId === e.pointerId) {
+      try {
+        canvas.releasePointerCapture(e.pointerId);
+      } catch {
+      }
+      pressedPointerId = null;
+    }
+    if (e.button === 0) controller.left_mouse_pressed = false;
+    if (e.button === 2) controller.right_mouse_pressed = false;
+    log("pointerup", e.button);
+    e.preventDefault();
+  };
+  const onContextMenu = (e) => {
+    e.preventDefault();
+  };
+  const onWheel = (e) => {
+    updateAlt(e);
+    controller.process_scroll(e.deltaY / 100);
+    log("wheel", e.deltaY);
+    e.preventDefault();
+  };
+  const onWindowBlur = () => {
+    controller.left_mouse_pressed = false;
+    controller.right_mouse_pressed = false;
+  };
+  window.addEventListener("keydown", onKeyDown, { capture: true });
+  window.addEventListener("keyup", onKeyUp, { capture: true });
+  window.addEventListener("blur", onWindowBlur);
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("contextmenu", onContextMenu);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+  return () => {
+    window.removeEventListener("keydown", onKeyDown, { capture: true });
+    window.removeEventListener("keyup", onKeyUp, { capture: true });
+    window.removeEventListener("blur", onWindowBlur);
+    canvas.removeEventListener("pointerdown", onPointerDown);
+    canvas.removeEventListener("pointermove", onPointerMove);
+    canvas.removeEventListener("pointerup", onPointerUp);
+    canvas.removeEventListener("contextmenu", onContextMenu);
+    canvas.removeEventListener("wheel", onWheel);
+  };
+}
+async function open_window(file, scene, config, pointcloud_file_path, scene_file_path) {
   const canvas = document.getElementById("window-canvas") ?? (() => {
     const c = document.createElement("canvas");
     c.id = "window-canvas";
     c.style.width = "100%";
     c.style.height = "100%";
     document.body.appendChild(c);
-    const dpr = window.devicePixelRatio || 1;
-    const rect = c.getBoundingClientRect();
-    c.width = Math.max(1, Math.floor(rect.width * dpr));
-    c.height = Math.max(1, Math.floor(rect.height * dpr));
     return c;
   })();
+  const backingFromCss = () => {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      w: Math.max(1, Math.floor(rect.width * dpr)),
+      h: Math.max(1, Math.floor(rect.height * dpr)),
+      dpr
+    };
+  };
+  const { w: realW, h: realH, dpr: realDpr } = backingFromCss();
+  const initW = 800, initH = 600;
+  canvas.width = initW;
+  canvas.height = initH;
   const state = await WindowContext.new(canvas, file, config);
+  const _unbindInput = bind_input(canvas, state["controller"]);
+  const applyRealSize = () => {
+    const now = backingFromCss();
+    if (canvas.width !== now.w) canvas.width = now.w;
+    if (canvas.height !== now.h) canvas.height = now.h;
+    state.resize({ width: now.w, height: now.h }, now.dpr);
+  };
+  applyRealSize();
+  const ro = new ResizeObserver(applyRealSize);
+  ro.observe(canvas);
+  addEventListener("resize", applyRealSize, { passive: true });
+  addEventListener("orientationchange", applyRealSize, { passive: true });
   state.pointcloud_file_path = pointcloud_file_path;
-  if (scene_file) {
+  if (scene) {
     try {
-      const s = await Scene.fromJson(scene_file);
+      const s = await Scene.fromJson(scene);
       state["set_scene"](s);
-      state;
+      state["set_scene_camera"]?.(0);
       state.scene_file_path = scene_file_path;
     } catch (err) {
       console.error("cannot load scene:", err);
@@ -6307,12 +6733,11 @@ async function open_window(file, scene_file, config, pointcloud_file_path, scene
     const now = performance.now();
     const dt = (now - last) / 1e3;
     last = now;
-    const old_settings = JSON.stringify(state["splatting_args"]);
     state.update(dt);
     const [redraw_ui, shapes] = state.ui();
     const res = state["splatting_args"].resolution;
     const resChange = res[0] !== state["config"].width || res[1] !== state["config"].height;
-    const request_redraw = old_settings !== JSON.stringify(state["splatting_args"]) || resChange;
+    const request_redraw = state._changed || resChange;
     if (request_redraw || redraw_ui) {
       state["fps"] = 1 / Math.max(1e-6, dt) * 0.05 + state["fps"] * 0.95;
       state.render(request_redraw, state["ui_visible"] ? shapes : void 0);

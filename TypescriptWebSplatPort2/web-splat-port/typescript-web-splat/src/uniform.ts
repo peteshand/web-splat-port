@@ -1,6 +1,16 @@
 // uniform.ts
 
+// Shared one-shot logging gate (robust to module load order)
+function loggingEnabled(): boolean {
+  const g = globalThis as any;
+  if (typeof g.__LOGGING_ENABLED__ === 'undefined') {
+    g.__LOGGING_ENABLED__ = true; // default to on until renderer flips it off
+  }
+  return !!g.__LOGGING_ENABLED__;
+}
+
 function logi(tag: string, msg: string, extra?: any) {
+  if (!loggingEnabled()) return;
   if (extra !== undefined) {
     console.log(`${tag} ${msg}`, extra);
   } else {

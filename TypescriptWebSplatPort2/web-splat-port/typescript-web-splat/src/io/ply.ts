@@ -6,16 +6,29 @@ import { Gaussian } from '../pointcloud';
 import { buildCov, shDegFromNumCoefs, sigmoid } from '../utils';
 import { GenericGaussianPointCloud, PointCloudReader } from './mod';
 
+/* -------------------------------------------------------------------------- */
+/*                           DEBUG: limit loaded splats                        */
+/* -------------------------------------------------------------------------- */
+const DEBUG_MAX_SPLATS: number | null = null;
+
+/* -------------------------------------------------------------------------- */
+/*                      DEBUG: one-shot data dump for splat 0                 */
+/* -------------------------------------------------------------------------- */
+const DEBUG_LOG_PLY_SAMPLE0: boolean = true;
+let __PLY_SAMPLE_LOGGED__ = false;
+
 /* ------------------------- helpers for fixed-length SH ------------------------- */
-/** One SH coefficient triplet (r,g,b) */
 type SHTriplet = [number, number, number];
-/** Exactly 16 SH triplets, fixed-length tuple */
 type SHBlock16 = [
   SHTriplet, SHTriplet, SHTriplet, SHTriplet,
   SHTriplet, SHTriplet, SHTriplet, SHTriplet,
   SHTriplet, SHTriplet, SHTriplet, SHTriplet,
   SHTriplet, SHTriplet, SHTriplet, SHTriplet
 ];
+
+/* --------------------------- module-scope scratch --------------------------- */
+const qScratch = quat.create();
+const scaleScratch = vec3.create();
 
 /* -------------------------------------------------------------------------- */
 /*                               Header parsing                                */
@@ -105,7 +118,6 @@ function utf8Bytes(s: string): Uint8Array {
 }
 
 function asciiDecode(bytes: Uint8Array): string {
-  // header is ASCII; utf-8 is fine for ASCII range
   return new TextDecoder('utf-8').decode(bytes);
 }
 
@@ -124,12 +136,15 @@ export class PlyReader implements PointCloudReader {
   private kernel_size: number | null;
   private background_color: [number, number, number] | null;
 
+  // precomputed once (avoids per-splat allocation)
+  private numCoefs: number;
+  private restScratch: Float32Array;
+
   constructor(reader: ArrayBuffer) {
     this.header = parsePlyHeader(reader);
     this.dv = new DataView(reader);
     this.offset = this.header.headerByteLength;
 
-    // file_sh_deg from count of f_* properties
     const numShCoefs = this.header.vertexPropNames.filter((n) => n.startsWith('f_')).length;
     const deg = shDegFromNumCoefs(numShCoefs / 3);
     if (deg == null) {
@@ -137,7 +152,20 @@ export class PlyReader implements PointCloudReader {
     }
     this.sh_deg = deg;
 
-    this.num_points = this.header.vertexCount;
+    // Precompute counts + scratch for SH rest
+    this.numCoefs = (this.sh_deg + 1) * (this.sh_deg + 1);
+    this.restScratch = new Float32Array(Math.max(0, (this.numCoefs - 1) * 3));
+
+    // Apply debug clamp to number of points
+    const fileCount = this.header.vertexCount;
+    const clamped =
+      DEBUG_MAX_SPLATS != null && DEBUG_MAX_SPLATS > 0
+        ? Math.min(fileCount, DEBUG_MAX_SPLATS)
+        : fileCount;
+    if (clamped !== fileCount) {
+      console.log(`[ply] DEBUG: clamping splats ${fileCount} -> ${clamped}`);
+    }
+    this.num_points = clamped;
 
     // comments
     this.mip_splatting = parseBoolFromComments(this.header.comments, 'mip');
@@ -212,43 +240,59 @@ export class PlyReader implements PointCloudReader {
     sh[0][1] = this.readF32(littleEndian);
     sh[0][2] = this.readF32(littleEndian);
 
-    const numCoefs = (this.sh_deg + 1) * (this.sh_deg + 1);
-    const restCount = (numCoefs - 1) * 3;
-    const rest = new Float32Array(restCount);
+    // read remaining channel-first SH into reusable scratch
+    const restCount = (this.numCoefs - 1) * 3;
+    const rest = this.restScratch;
     for (let i = 0; i < restCount; i++) rest[i] = this.readF32(littleEndian);
 
-    // channel-first layout -> per-coef triplets
-    for (let i = 0; i < numCoefs - 1; i++) {
-      for (let j = 0; j < 3; j++) {
-        sh[i + 1][j] = rest[j * (numCoefs - 1) + i];
-      }
+    // channel-first -> per-coef triplets
+    const stride = (this.numCoefs - 1);
+    for (let i = 0; i < this.numCoefs - 1; i++) {
+      // r,g,b
+      sh[i + 1][0] = rest[0 * stride + i];
+      sh[i + 1][1] = rest[1 * stride + i];
+      sh[i + 1][2] = rest[2 * stride + i];
     }
 
     // opacity: sigmoid(f32)
     const opacity = sigmoid(this.readF32(littleEndian));
 
-    // scale: exp(f32)
+    // scale: exp(f32) -> write into scratch vec
     const s1 = Math.exp(this.readF32(littleEndian));
     const s2 = Math.exp(this.readF32(littleEndian));
     const s3 = Math.exp(this.readF32(littleEndian));
-    const scaleV = vec3.fromValues(s1, s2, s3);
+    scaleScratch[0] = s1; scaleScratch[1] = s2; scaleScratch[2] = s3;
 
-    // rotation quaternion: (w,x,y,z) -> gl-matrix order [x,y,z,w]
+    // rotation quaternion: (w,x,y,z) -> gl-matrix order [x,y,z,w] in scratch
     const r0 = this.readF32(littleEndian);
     const r1 = this.readF32(littleEndian);
     const r2 = this.readF32(littleEndian);
     const r3 = this.readF32(littleEndian);
-    const q = quat.fromValues(r1, r2, r3, r0);
-    quat.normalize(q, q);
+    // q = [x,y,z,w]
+    qScratch[0] = r1; qScratch[1] = r2; qScratch[2] = r3; qScratch[3] = r0;
+    quat.normalize(qScratch, qScratch);
 
-    // covariance upper-triangular
-    const cov = buildCov(q, scaleV);
+    // covariance upper-triangular (allocation-free buildCov)
+    const cov = buildCov(qScratch, scaleScratch);
 
     const g: Gaussian = {
       xyz: { x: px, y: py, z: pz },
       opacity,
       cov: [cov[0], cov[1], cov[2], cov[3], cov[4], cov[5]],
     };
+
+    // one-shot sample logging
+    if (DEBUG_LOG_PLY_SAMPLE0 && !__PLY_SAMPLE_LOGGED__) {
+      __PLY_SAMPLE_LOGGED__ = true;
+      console.log('[ply::sample0] pos', [px, py, pz]);
+      console.log('[ply::sample0] opacity', opacity);
+      console.log('[ply::sample0] scale(exp)', [s1, s2, s3]);
+      console.log('[ply::sample0] quat(x,y,z,w) normalized', [qScratch[0], qScratch[1], qScratch[2], qScratch[3]]);
+      console.log('[ply::sample0] cov[0..5]', [cov[0], cov[1], cov[2], cov[3], cov[4], cov[5]]);
+      console.log('[ply::sample0] SH[0]', [sh[0][0], sh[0][1], sh[0][2]]);
+      if (this.numCoefs > 1) console.log('[ply::sample0] SH[1]', [sh[1][0], sh[1][1], sh[1][2]]);
+      if (this.numCoefs > 2) console.log('[ply::sample0] SH[2]', [sh[2][0], sh[2][1], sh[2][2]]);
+    }
 
     return { g, s: sh };
   }

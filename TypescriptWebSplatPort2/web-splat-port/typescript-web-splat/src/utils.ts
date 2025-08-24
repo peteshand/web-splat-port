@@ -1,7 +1,7 @@
 // utils.ts
 // 1-for-1 port of utils.rs utilities used by the renderer.
 
-import { mat3, quat, vec3 } from 'gl-matrix';
+import { quat, vec3 } from 'gl-matrix';
 
 /** Map KeyboardEvent.code like "Digit3" -> 3, otherwise null */
 export function key_to_num(code: string): number | null {
@@ -198,31 +198,53 @@ export function sh_deg_from_num_coefs(n: number): number | null {
  * Build the symmetric covariance (upper-triangular packed: m00,m01,m02,m11,m12,m22)
  * from rotation (unit quaternion) and axis scales.
  * Matches Kerbl et al. “3D Gaussian Splatting …”
+ *
+ * rotation is [x,y,z,w] (unit), scale is [sx,sy,sz] after exp().
  */
 export function build_cov(
-  rotation: quat,
-  scale: vec3
+  rotation: quat,   // [x,y,z,w], already normalized
+  scale: vec3       // [sx,sy,sz], already exp()'d
 ): [number, number, number, number, number, number] {
-  // R from quaternion
-  const R = mat3.create();
-  mat3.fromQuat(R, rotation);
+  const x = rotation[0], y = rotation[1], z = rotation[2], w = rotation[3];
+  const sx = scale[0],   sy = scale[1],   sz = scale[2];
 
-  // S diagonal
-  const S = mat3.create();
-  mat3.fromScaling(S, scale);
+  // D = diag(s^2)
+  const d0 = sx * sx, d1 = sy * sy, d2 = sz * sz;
 
-  // L = R * S
-  const L = mat3.create();
-  mat3.multiply(L, R, S);
+  // Quaternion -> rotation matrix (same convention as cgmath::Matrix3::from(quat))
+  const xx = x * x, yy = y * y, zz = z * z;
+  const xy = x * y, xz = x * z, yz = y * z;
+  const wx = w * x, wy = w * y, wz = w * z;
 
-  // M = L * L^T
-  const Lt = mat3.create();
-  mat3.transpose(Lt, L);
-  const M = mat3.create();
-  mat3.multiply(M, L, Lt);
+  const r00 = 1 - 2 * (yy + zz);
+  const r01 = 2 * (xy - wz);
+  const r02 = 2 * (xz + wy);
 
-  // return upper triangular
-  return [M[0], M[1], M[2], M[4], M[5], M[8]];
+  const r10 = 2 * (xy + wz);
+  const r11 = 1 - 2 * (xx + zz);
+  const r12 = 2 * (yz - wx);
+
+  const r20 = 2 * (xz - wy);
+  const r21 = 2 * (yz + wx);
+  const r22 = 1 - 2 * (xx + yy);
+
+  // RD = R * D  (scales R's columns by d0,d1,d2)
+  const rd00 = r00 * d0, rd01 = r01 * d1, rd02 = r02 * d2;
+  const rd10 = r10 * d0, rd11 = r11 * d1, rd12 = r12 * d2;
+  const rd20 = r20 * d0, rd21 = r21 * d1, rd22 = r22 * d2;
+
+  // M = RD * R^T
+  const m00 = rd00 * r00 + rd01 * r01 + rd02 * r02;
+  const m01 = rd00 * r10 + rd01 * r11 + rd02 * r12;
+  const m02 = rd00 * r20 + rd01 * r21 + rd02 * r22;
+
+  const m11 = rd10 * r10 + rd11 * r11 + rd12 * r12;
+  const m12 = rd10 * r20 + rd11 * r21 + rd12 * r22;
+
+  const m22 = rd20 * r20 + rd21 * r21 + rd22 * r22;
+
+  // Pack exactly like Rust: [m00, m01, m02, m11, m12, m22]
+  return [m00, m01, m02, m11, m12, m22];
 }
 
 /** Numerically stable sigmoid */

@@ -146,57 +146,58 @@ export class CameraController {
   update_camera(camera: PerspectiveCamera, dt_seconds: number): void {
     const dt = dt_seconds;
 
-    // --- orbit baseline ---
+    // Vector from center to camera
     const dir = vec3.subtract(vec3.create(), camera.position, this.center);
     const distance = Math.max(1e-12, vec3.length(dir));
+
+    // Dolly via scroll
     const newDist = Math.exp(Math.log(distance) + this.scroll * dt * 10.0 * this.speed);
     const dirNorm = vec3.scale(vec3.create(), vec3.normalize(vec3.create(), dir), newDist);
 
-    // --- fixed up (no-roll). allow custom up if user set it; otherwise world-up ---
+    // Fixed up (no roll): use custom up if present, else world up
     const worldUp = this.up ? normalizeSafe(this.up) : vec3.fromValues(0, 1, 0);
 
-    // --- pan (unchanged) ---
-    const invQ = quat.invert(quat.create(), camera.rotation);
-    const x_axis_cam = vec3.transformQuat(vec3.create(), vec3.fromValues(1, 0, 0), invQ);
-    const y_axis_cam = this.up ? vec3.clone(this.up) : vec3.transformQuat(vec3.create(), vec3.fromValues(0, 1, 0), invQ);
+    // ---------- PAN AXES (match Rust; invert left/right) ----------
+    // x_axis = right = normalize(up × dir)
+    let x_axis = vec3.cross(vec3.create(), worldUp, dirNorm);
+    x_axis = normalizeSafe(x_axis);
+    if (vec3.length(x_axis) < 1e-6) {
+      x_axis = vec3.fromValues(1, 0, 0); // rare pole fallback
+    }
+    const y_axis = worldUp;
 
+    // Invert left/right by flipping sign on x_axis contribution
     const panScale = dt * this.speed * 0.1 * distance;
     const pan = vec3.create();
-    const sx = vec3.scale(vec3.create(), x_axis_cam, this.shift[1] * panScale);
-    const sy = vec3.scale(vec3.create(), y_axis_cam, -this.shift[0] * panScale);
-    vec3.add(pan, sx, sy);
+    vec3.scaleAndAdd(pan, pan, x_axis, -this.shift[1] * panScale);
+    vec3.scaleAndAdd(pan, pan, y_axis, -this.shift[0] * panScale);
     vec3.add(this.center, this.center, pan);
     vec3.add(camera.position, camera.position, pan);
 
-    // --- orbit: yaw about worldUp, pitch about "right" from (worldUp x viewDir) ---
-    const yaw   = (this.rotation[0]) * dt * this.sensitivity;   // mouse X
-    const pitch = (this.rotation[1]) * dt * this.sensitivity;   // mouse Y (inverted to feel natural)
+    // ---------- ORBIT (yaw/pitch only, no roll) ----------
+    const yaw   = (this.rotation[0]) * dt * this.sensitivity; // mouse X
+    const pitch = (this.rotation[1]) * dt * this.sensitivity; // mouse Y
 
-    // right axis from current viewing direction (dirNorm points center->cam)
-    let right = vec3.cross(vec3.create(), worldUp, dirNorm);
-    right = normalizeSafe(right);
-    if (vec3.length(right) < 1e-6) {
-      // looking straight up/down; pick a stable right
-      right = vec3.fromValues(1, 0, 0);
-    }
+    // right axis for pitch: up × viewDir (same as x_axis above)
+    let right = vec3.clone(x_axis);
+    if (vec3.length(right) < 1e-6) right = vec3.fromValues(1, 0, 0);
 
     const qYaw   = quat.setAxisAngle(quat.create(), worldUp, yaw);
     const qPitch = quat.setAxisAngle(quat.create(), right,  pitch);
-    // IMPORTANT: no roll (eta) at all.
     const rot = quat.multiply(quat.create(), qYaw, qPitch);
 
     const new_dir = vec3.transformQuat(vec3.create(), dirNorm, rot);
 
-    // avoid near-up singularity
+    // Prevent pole flip (~0.1 rad)
     if (angle_short(worldUp, new_dir) < 0.1) {
       vec3.copy(new_dir, dirNorm);
     }
 
-    // position and orientation (look along -new_dir with fixed up = worldUp)
+    // Position and orientation (look along -new_dir with fixed up = worldUp)
     vec3.add(camera.position, this.center, new_dir);
     camera.rotation = lookRotation(vec3.scale(vec3.create(), new_dir, -1), worldUp);
 
-    // --- damping (unchanged) ---
+    // ---------- damping ----------
     let decay = Math.pow(0.8, dt * 60.0);
     if (decay < 1e-4) decay = 0.0;
 
