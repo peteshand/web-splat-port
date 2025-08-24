@@ -110,6 +110,39 @@ export class GenericGaussianPointCloud {
     );
   }
 
+  // Fast path: pre-packed bytes + precomputed bbox/center/up
+  static new_packed(
+    gaussiansBytes: Uint8Array,
+    shCoefsBytes: Uint8Array,
+    sh_deg: number,
+    num_points: number,
+    kernel_size: number | null,
+    mip_splatting: boolean | null,
+    background_color: [number, number, number] | null,
+    covars: Covariance3D[] | null,
+    quantization: GaussianQuantization | null,
+    up: Vector3f32 | null,
+    center: Point3f32,
+    bbox: Aabb,
+  ): GenericGaussianPointCloud {
+    return new GenericGaussianPointCloud(
+      gaussiansBytes,
+      shCoefsBytes,
+      sh_deg,
+      num_points,
+      kernel_size,
+      mip_splatting,
+      background_color,
+      covars,
+      quantization,
+      up,
+      center,
+      bbox,
+      /* compressed */ false,
+      /* parsed */ null,
+    );
+  }
+
   // Rust: fn new_compressed(...)
   static new_compressed(
     gaussians: GaussianCompressed[],
@@ -198,13 +231,10 @@ export class GenericGaussianPointCloud {
     throw new Error('Parsed gaussians not available');
   }
 
-  // (kept aligned with the Rust provided logic signature-wise;
-  // the Rust version appears inconsistent; we mirror the surface API)
   gaussians_compressed(): GaussianCompressed[] {
     if (this._compressed) {
       throw new Error('Gaussians are compressed');
     } else {
-      // The Rust snippet returns a cast here; we surface an error like it would at runtime.
       throw new Error('Not compressed');
     }
   }
@@ -230,46 +260,29 @@ function startsWith(buf: Uint8Array, sig: Uint8Array): boolean {
   return true;
 }
 
-/* ---------- fast float32 -> float16 (no per-call allocations) ---------- */
-// Reuse a single scratch buffer to avoid millions of tiny allocations.
-const __f16_scratch_f32 = new Float32Array(1);
-const __f16_scratch_u32 = new Uint32Array(__f16_scratch_f32.buffer);
-
+// float32 -> float16 (uint16)
 function f32_to_f16(val: number): number {
-  __f16_scratch_f32[0] = val;
-  const x = __f16_scratch_u32[0];
+  const f32 = new Float32Array(1);
+  const u32 = new Uint32Array(f32.buffer);
+  f32[0] = val;
+  const x = u32[0];
 
-  const sign = (x >>> 16) & 0x8000; // bit 15
-  let exp  = (x >>> 23) & 0xff;     // f32 exponent
-  let mant = x & 0x007fffff;        // f32 mantissa
+  const sign = (x >>> 16) & 0x8000;
+  let exp  = (x >>> 23) & 0xff;
+  let mant = x & 0x007fffff;
 
-  if (exp === 0xff) {
-    // Inf/NaN
-    const isNan = mant !== 0;
-    return sign | 0x7c00 | (isNan ? 0x0200 : 0);
-  }
+  if (exp === 0xff) return sign | 0x7c00 | (mant ? 1 : 0);
+  if (exp === 0) return sign;
 
-  if (exp === 0) {
-    // Zero/subnormal -> signed zero (fine for GA data)
-    return sign;
-  }
-
-  // Re-bias exponent: e = exp - 127 + 15 = exp - 112
   let e = exp - 112;
-
   if (e <= 0) {
-    if (e < -10) return sign; // underflow -> zero
-    mant = (mant | 0x00800000) >>> (1 - e); // add hidden 1, shift
-    if (mant & 0x00001000) mant += 0x00002000; // round-to-nearest-even
+    if (e < -10) return sign;
+    mant = (mant | 0x00800000) >>> (1 - e);
+    if (mant & 0x00001000) mant += 0x00002000;
     return sign | (mant >>> 13);
   }
+  if (e >= 0x1f) return sign | 0x7c00;
 
-  if (e >= 0x1f) {
-    // overflow -> Inf
-    return sign | 0x7c00;
-  }
-
-  // normal half with rounding
   if (mant & 0x00001000) {
     mant += 0x00002000;
     if (mant & 0x00800000) {
@@ -278,58 +291,63 @@ function f32_to_f16(val: number): number {
       if (e >= 0x1f) return sign | 0x7c00;
     }
   }
-
   return sign | (e << 10) | ((mant >>> 13) & 0x03ff);
 }
 
-/* Efficient writers using Uint16Array where possible */
+function writeF16(view: DataView, byteOffset: number, v: number) {
+  view.setUint16(byteOffset, f32_to_f16(v), true);
+}
 
+// Gaussian: 20 bytes each (3*f16 + f16 + 6*f16)
 function packGaussiansF16(gaussians: Gaussian[]): Uint8Array {
-  const WORDS_PER = 10; // 10 halfs = 20 bytes
-  const u16 = new Uint16Array(gaussians.length * WORDS_PER);
-  let i = 0;
+  const BYTES_PER = 20;
+  const buf = new ArrayBuffer(gaussians.length * BYTES_PER);
+  const view = new DataView(buf);
+  let off = 0;
   for (const g of gaussians) {
-    u16[i++] = f32_to_f16(g.xyz.x);
-    u16[i++] = f32_to_f16(g.xyz.y);
-    u16[i++] = f32_to_f16(g.xyz.z);
-    u16[i++] = f32_to_f16(g.opacity);
-    u16[i++] = f32_to_f16(g.cov[0]);
-    u16[i++] = f32_to_f16(g.cov[1]);
-    u16[i++] = f32_to_f16(g.cov[2]);
-    u16[i++] = f32_to_f16(g.cov[3]);
-    u16[i++] = f32_to_f16(g.cov[4]);
-    u16[i++] = f32_to_f16(g.cov[5]);
+    writeF16(view, off + 0, g.xyz.x);
+    writeF16(view, off + 2, g.xyz.y);
+    writeF16(view, off + 4, g.xyz.z);
+    writeF16(view, off + 6, g.opacity);
+    writeF16(view, off + 8, g.cov[0]);
+    writeF16(view, off + 10, g.cov[1]);
+    writeF16(view, off + 12, g.cov[2]);
+    writeF16(view, off + 14, g.cov[3]);
+    writeF16(view, off + 16, g.cov[4]);
+    writeF16(view, off + 18, g.cov[5]);
+    off += BYTES_PER;
   }
-  return new Uint8Array(u16.buffer);
+  return new Uint8Array(buf);
 }
 
 // sh_coefs: Vec<[[f16;3];16]> per point => 96 bytes per point
 function packShCoefsF16(sh: SHBlock16[]): Uint8Array {
-  const WORDS_PER_POINT = 16 * 3; // 48 halfs = 96 bytes
-  const u16 = new Uint16Array(sh.length * WORDS_PER_POINT);
-  let i = 0;
+  const BYTES_PER_POINT = 16 * 3 * 2; // 96
+  const buf = new ArrayBuffer(sh.length * BYTES_PER_POINT);
+  const view = new DataView(buf);
+  let off = 0;
   for (const block of sh) {
-    // 16 fixed entries
-    for (let k = 0; k < 16; k++) {
-      const t = block[k];
-      u16[i++] = f32_to_f16(t[0]);
-      u16[i++] = f32_to_f16(t[1]);
-      u16[i++] = f32_to_f16(t[2]);
+    for (let i = 0; i < 16; i++) {
+      const [r, g, b] = block[i];
+      writeF16(view, off + 0, r);
+      writeF16(view, off + 2, g);
+      writeF16(view, off + 4, b);
+      off += 6;
     }
   }
-  return new Uint8Array(u16.buffer);
+  return new Uint8Array(buf);
 }
 
-// GaussianCompressed: 16 bytes each (mix of halfs + ints) — keep DataView here
+// GaussianCompressed: 16 bytes each
 function packGaussiansCompressed(g: GaussianCompressed[]): Uint8Array {
   const BYTES_PER = 16;
   const buf = new ArrayBuffer(g.length * BYTES_PER);
   const view = new DataView(buf);
   let off = 0;
   for (const v of g) {
-    view.setUint16(off + 0, f32_to_f16(v.xyz.x), true);
-    view.setUint16(off + 2, f32_to_f16(v.xyz.y), true);
-    view.setUint16(off + 4, f32_to_f16(v.xyz.z), true);
+    writeF16(view, off + 0, v.xyz.x);
+    writeF16(view, off + 2, v.xyz.y);
+    writeF16(view, off + 4, v.xyz.z);
     view.setInt8(off + 6, v.opacity);
     view.setInt8(off + 7, v.scale_factor);
     view.setUint32(off + 8, v.geometry_idx, true);
