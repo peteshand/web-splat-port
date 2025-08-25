@@ -153,8 +153,8 @@ export interface GenericGaussianPointCloud {
   sh_coefs_buffer(): ArrayBuffer | ArrayBufferView; // SH buffer
 
   // only for compressed:
-  covars?: ArrayBuffer | ArrayBufferView;   // covariance blocks
-  quantization?: ArrayBufferView;           // bytes for GaussianQuantization uniform
+  covars?: ArrayBuffer | ArrayBufferView;                 // covariance blocks
+  quantization?: ArrayBufferView | GaussianQuantization;  // accept bytes or struct
 
   aabb: { min: Vec3; max: Vec3 };
   center: Vec3;
@@ -208,6 +208,28 @@ function getLayouts(device: GPUDevice): LayoutCache {
   LAYOUTS.set(device, l);
   pclog('getLayouts(): created new layouts');
   return l;
+}
+
+function isArrayBufferView(x: any): x is ArrayBufferView {
+  return x && typeof x === 'object' && x.buffer instanceof ArrayBuffer && typeof (x as any).byteLength === 'number';
+}
+
+function packGaussianQuantizationToBytes(q: GaussianQuantization): Uint8Array {
+  const buf = new ArrayBuffer(64);     // 4 * Quantization, each 16 bytes
+  const dv = new DataView(buf);
+
+  function writeQuant(off: number, zero: number, scale: number) {
+    dv.setInt32(off + 0, zero | 0, true);
+    dv.setFloat32(off + 4, scale, true);
+    dv.setUint32(off + 8, 0, true);
+    dv.setUint32(off + 12, 0, true);
+  }
+
+  writeQuant( 0, q.color_dc.zero_point,       q.color_dc.scale);
+  writeQuant(16, q.color_rest.zero_point,     q.color_rest.scale);
+  writeQuant(32, q.opacity.zero_point,        q.opacity.scale);
+  writeQuant(48, q.scaling_factor.zero_point, q.scaling_factor.scale);
+  return new Uint8Array(buf);
 }
 
 /* -------------------------------- PointCloud -------------------------------- */
@@ -305,7 +327,15 @@ export class PointCloud {
       entries.push({ binding: 3, resource: { buffer: this.covars_buffer } });
 
       if (!pc.quantization) throw new Error('compressed() true but quantization missing');
-      this.quantization_uniform = UniformBuffer.new(device, pc.quantization, 'quantization uniform buffer');
+
+      let quantView: ArrayBufferView;
+      if (isArrayBufferView(pc.quantization)) {
+        quantView = asBytes(pc.quantization);
+      } else {
+        quantView = packGaussianQuantizationToBytes(pc.quantization as GaussianQuantization);
+      }
+
+      this.quantization_uniform = UniformBuffer.new(device, quantView, 'quantization uniform buffer');
       entries.push({ binding: 4, resource: { buffer: this.quantization_uniform.bufferRef() } });
 
       this._bind_group = device.createBindGroup({
@@ -382,10 +412,7 @@ export class PointCloud {
   // ---- getters matching Rust API ----
   compressed(): boolean { return this.compressed_; }
   num_points(): number { return this.num_points_; }       // exact Rust name
-  numPoints(): number {
-    // hot path used by renderer/preprocess
-    return this.num_points_;
-  }
+  numPoints(): number { return this.num_points_; }
   sh_deg(): number { return this.sh_deg_; }               // exact Rust name
   shDeg(): number { return this.sh_deg_; }                // TS convenience
   bbox(): Aabb { return this.bbox_; }

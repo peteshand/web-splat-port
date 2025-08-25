@@ -12,7 +12,7 @@ import {
 } from '../pointcloud';
 
 import { PlyReader } from './ply';
-// import { NpzReader } from './npz';
+import { NpzReader, ZipNpzArchive } from './npz'; 
 
 /* ------------------------- helpers for fixed-length SH ------------------------- */
 /** One SH coefficient triplet (r,g,b) */
@@ -35,8 +35,9 @@ export class GenericGaussianPointCloud {
   private shCoefsBytes: Uint8Array;
   private _compressed: boolean;
 
-  public covars: Covariance3D[] | null;
-  public quantization: GaussianQuantization | null;
+  // NOTE: names mirror Rust; the actual values are byte-packed like Rust consumers expect.
+  public covars: Covariance3D[] | null;              // runtime: Uint16Array (f16 packed)
+  public quantization: GaussianQuantization | null;  // runtime: Uint8Array (64 bytes)
   public sh_deg: number;
   public num_points: number;
   public kernel_size: number | null;
@@ -51,16 +52,18 @@ export class GenericGaussianPointCloud {
 
   static load(data: ArrayBuffer): GenericGaussianPointCloud {
     const sig = new Uint8Array(data, 0, 4);
-
+  
     if (startsWith(sig, PlyReader.magic_bytes())) {
       const ply = new PlyReader(data);
       return ply.read();
     }
-    // if (startsWith(sig, NpzReader.magic_bytes())) {
-    //   const npz = new NpzReader(data);
-    //   return npz.read();
-    // }
-
+    if (startsWith(sig, NpzReader.magic_bytes())) {
+      // zip (.npz) → in-memory archive → NpzReader
+      const archive = ZipNpzArchive.fromArrayBuffer(data);
+      const npz = new NpzReader(archive);
+      return npz.read();
+    }
+  
     throw new Error('Unknown file format');
   }
 
@@ -207,8 +210,8 @@ export class GenericGaussianPointCloud {
     this.shCoefsBytes = shCoefsBytes;
     this._compressed = compressed;
 
-    this.covars = covars ?? null;
-    this.quantization = quantization ?? null;
+    this.covars = covars ?? null;             // runtime: Uint16Array in compressed path
+    this.quantization = quantization ?? null; // runtime: Uint8Array (64 bytes)
 
     this.sh_deg = sh_deg;
     this.num_points = num_points;

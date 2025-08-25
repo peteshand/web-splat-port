@@ -1,9 +1,8 @@
 // io/ply.ts
 // Fast packed reader: parses PLY header, streams binary payload into f16-packed buffers,
-// and computes bbox + plane (center/up) in one pass.
+// computes bbox + plane (center/up) in one pass, and avoids gl-matrix allocations.
 
-import { quat, vec3 } from 'gl-matrix';
-import { buildCov, shDegFromNumCoefs, sigmoid } from '../utils';
+import { buildCovScalar, shDegFromNumCoefs, sigmoid } from '../utils';
 import { Aabb } from '../pointcloud';
 import { GenericGaussianPointCloud } from './mod';
 
@@ -200,19 +199,15 @@ export class PlyReader {
 
     if (little) {
       if ((payloadU8.byteOffset & 0x3) === 0) {
-        // aligned: zero-copy view
         f32 = new Float32Array(this.dv.buffer, this.offset);
       } else {
-        // unaligned: copy once to aligned buffer
         const buf = new ArrayBuffer(payloadU8.byteLength);
         new Uint8Array(buf).set(payloadU8);
         f32 = new Float32Array(buf);
       }
     } else {
-      // big-endian: copy + byteswap to little
       const buf = new ArrayBuffer(payloadU8.byteLength);
       const dst = new Uint8Array(buf);
-      // swap each 32-bit word
       const len = (payloadU8.byteLength / 4) | 0;
       const src = payloadU8;
       for (let i = 0; i < len; i++) {
@@ -241,6 +236,8 @@ export class PlyReader {
     // pos(3), normal(3), SH.dc(3), SH.rest((numCoefs-1)*3 channel-first), opacity(1),
     // scale exp(3), quat (w,x,y,z)(4)
     const floatsPerVertex = 3 + 3 + 3 + restCount + 1 + 3 + 4;
+
+    const cov6 = new Float32Array(6); // scratch for covariance
 
     let idx = 0; // index into f32
     for (let p = 0; p < n; p++) {
@@ -290,23 +287,22 @@ export class PlyReader {
       const s1 = Math.exp(f32[idx++]);
       const s2 = Math.exp(f32[idx++]);
       const s3 = Math.exp(f32[idx++]);
-      const scaleV = vec3.fromValues(s1, s2, s3);
 
-      // quaternion (w,x,y,z) -> [x,y,z,w]
-      const r0 = f32[idx++], r1 = f32[idx++], r2 = f32[idx++], r3 = f32[idx++];
-      const q = quat.fromValues(r1, r2, r3, r0);
-      quat.normalize(q, q);
+      // quaternion (w,x,y,z) -> normalize -> [x,y,z,w]
+      let qw = f32[idx++], qx = f32[idx++], qy = f32[idx++], qz = f32[idx++];
+      const qn = Math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+      if (qn > 0) { qw /= qn; qx /= qn; qy /= qn; qz /= qn; }
 
-      // cov
-      const cov = buildCov(q, scaleV);
+      // cov into scratch
+      buildCovScalar(qx, qy, qz, qw, s1, s2, s3, cov6);
 
       if (DEBUG_LOG_PLY_SAMPLE0 && !__PLY_SAMPLE_LOGGED__) {
         __PLY_SAMPLE_LOGGED__ = true;
         console.log('[ply::sample0] pos', [px, py, pz]);
         console.log('[ply::sample0] opacity', opacity);
         console.log('[ply::sample0] scale(exp)', [s1, s2, s3]);
-        console.log('[ply::sample0] quat(x,y,z,w) normalized', [q[0], q[1], q[2], q[3]]);
-        console.log('[ply::sample0] cov[0..5]', cov);
+        console.log('[ply::sample0] quat(x,y,z,w) normalized', [qx, qy, qz, qw]);
+        console.log('[ply::sample0] cov[0..5]', Array.from(cov6));
         console.log('[ply::sample0] SH[0]', [dc_r, dc_g, dc_b]);
       }
 
@@ -316,12 +312,12 @@ export class PlyReader {
       gaussU16[gb + 1] = f32_to_f16_fast(py);
       gaussU16[gb + 2] = f32_to_f16_fast(pz);
       gaussU16[gb + 3] = f32_to_f16_fast(opacity);
-      gaussU16[gb + 4] = f32_to_f16_fast(cov[0]);
-      gaussU16[gb + 5] = f32_to_f16_fast(cov[1]);
-      gaussU16[gb + 6] = f32_to_f16_fast(cov[2]);
-      gaussU16[gb + 7] = f32_to_f16_fast(cov[3]);
-      gaussU16[gb + 8] = f32_to_f16_fast(cov[4]);
-      gaussU16[gb + 9] = f32_to_f16_fast(cov[5]);
+      gaussU16[gb + 4] = f32_to_f16_fast(cov6[0]);
+      gaussU16[gb + 5] = f32_to_f16_fast(cov6[1]);
+      gaussU16[gb + 6] = f32_to_f16_fast(cov6[2]);
+      gaussU16[gb + 7] = f32_to_f16_fast(cov6[3]);
+      gaussU16[gb + 8] = f32_to_f16_fast(cov6[4]);
+      gaussU16[gb + 9] = f32_to_f16_fast(cov6[5]);
 
       // advance to next vertex just in case (defensive); should already be exact
       // idx += (floatsPerVertex - (3+3+3+restCount+1+3+4));
