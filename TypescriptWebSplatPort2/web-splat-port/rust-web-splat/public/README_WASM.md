@@ -111,15 +111,37 @@ Open `http://localhost:8080`.
 ## Optional features
 
 ### NPZ support in the browser
-Build with `npz` feature:
+
+The default WASM build only supports `.ply`. To load compressed `.npz` files in the browser you must compile with the `npz` feature:
 
 ```bash
+# build with npz enabled
 cargo build --target wasm32-unknown-unknown --profile web-release --features npz
-wasm-bindgen --target web --out-dir public target/wasm32-unknown-unknown/web-release/web_splats.wasm
+
+# regenerate JS glue
+wasm-bindgen --target web --out-dir public   target/wasm32-unknown-unknown/web-release/web_splats.wasm
+```
+
+Artifacts:
+```
+public/web_splats.js
+public/web_splats_bg.wasm
+```
+
+Now you can pass `.npz` files to the viewer just like `.ply`.  
+If you don’t compile with `--features npz`, you’ll see runtime errors like:
+
+```
+called `Result::unwrap()` on an `Err` value: Unknown file format
 ```
 
 ### Video feature
-If you use the `video` feature (defined in `Cargo.toml`), enable it the same way.
+
+If you use the `video` feature (defined in `Cargo.toml`), enable it the same way:
+
+```bash
+cargo build --target wasm32-unknown-unknown --profile web-release --features video
+```
 
 ---
 
