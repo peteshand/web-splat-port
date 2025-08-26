@@ -140,7 +140,7 @@
         const [pc_data, scene_data] = await Promise.all([pc_promise, scene_promise]);
 
         // Important: let lib.ts own DPR/backing-store sizing completely
-        const mod = await import('./web_splat.js');
+        const mod = await import('./js/web_splat.js');
         await mod.run_wasm(pc_data, scene_data, pc_url, scene_url);
 
         const sp = document.getElementById('spinner');
