@@ -1,0 +1,31 @@
+{
+  "name": "haxe-web-splat",
+  "version": "1.0.0",
+  "description": "",
+  "private": true,
+  "scripts": {
+    "postinstall": "node ./scripts/install",
+    "build-haxe": "node ./scripts/compile",
+    "build-webpack": "cross-env NODE_OPTIONS=--openssl-legacy-provider npx webpack --config webpack.config.js",
+    "build": "npm run build-haxe && npm run build-webpack",
+    "start": "npm run build && cd ./public/ && http-server ."
+  },
+  "devDependencies": {
+    "chalk": "4.1.0",
+    "compression-webpack-plugin": "7.1.2",
+    "cross-env": "^10.0.0",
+    "haxe": "^5.2.1",
+    "haxe-utils": "0.1.4",
+    "source-map-loader": "2.0.1",
+    "uglify-js": "3.13.6",
+    "webpack": "5.31.2",
+    "webpack-cli": "4.6.0"
+  },
+  "haxeDependencies": {
+    "haxe": "4.2.1",
+    "haxelib": "4.0.2",
+    "neko": "2.1.0",
+    "uglifyjs": "1.0.0"
+  },
+  "author": ""
+}

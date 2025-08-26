@@ -1,0 +1,29 @@
+-main Main
+
+-D js-es=6
+-D shallow-expose
+-D source-map-content
+-D js-source-map
+-D debug
+-D threejs_include
+-D three_jsRequire
+-D html5
+
+-D uglifyjs_sourcemap
+
+-lib uglifyjs
+
+./libs.hxml
+
+-cp src
+-cp libs
+-cp externs
+-cp externs_mw
+
+--macro build.Build.embedAllCss("src")
+--macro build.Build.embedAllJson("src")
+
+-dce full
+-debug
+
+-js ./intermediate/web_splat.js
