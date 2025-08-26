@@ -4,6 +4,7 @@
 
 **/node_modules/
 
+**/libs.hxml
 **/package-lock.json
 
 **/intermediate/
