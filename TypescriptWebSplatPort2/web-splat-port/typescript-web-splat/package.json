@@ -7,7 +7,7 @@
   "scripts": {
     "_build": "tsc",
     "copy-shaders": "copyfiles -u 1 \"src/shaders/**/*\" dist",
-    "build": "esbuild src/lib.ts --bundle --format=esm --platform=browser --sourcemap --outfile=dist/web_splat.js && npm run copy-shaders",
+    "build": "esbuild src/lib.ts --bundle --format=esm --platform=browser --sourcemap --outfile=dist/js/web_splat.js && npm run copy-shaders",
     "dev": "tsc --watch",
     "serve": "http-server dist -p 8080",
     "clean": "rm -rf dist"
@@ -17,6 +17,7 @@
     "Josef Stumpfegger"
   ],
   "dependencies": {
+    "fflate": "^0.8.2",
     "gl-matrix": "^3.4.3"
   },
   "devDependencies": {
