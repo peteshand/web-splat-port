@@ -5,9 +5,10 @@
   "private": true,
   "scripts": {
     "postinstall": "node ./scripts/install",
+    "copy-shaders": "copyfiles -u 1 \"src/shaders/**/*\" dist",
     "build-haxe": "node ./scripts/compile",
     "build-webpack": "cross-env NODE_OPTIONS=--openssl-legacy-provider npx webpack --config webpack.config.js",
-    "build": "npm run build-haxe && npm run build-webpack",
+    "build": "npm run build-haxe && npm run build-webpack && npm run copy-shaders",
     "start": "npm run build && cd ./public/ && http-server ."
   },
   "devDependencies": {
@@ -19,7 +20,8 @@
     "source-map-loader": "2.0.1",
     "uglify-js": "3.13.6",
     "webpack": "5.31.2",
-    "webpack-cli": "4.6.0"
+    "webpack-cli": "4.6.0",
+    "copyfiles": "^2.4.1"
   },
   "haxeDependencies": {
     "haxe": "4.2.1",

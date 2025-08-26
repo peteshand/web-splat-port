@@ -8,7 +8,7 @@ module.exports = {
   entry: './intermediate/web_splat.js',
   output: {
     filename: 'web_splat.js',
-    path: path.resolve(__dirname, 'dist'),
+    path: path.resolve(__dirname, 'dist', 'js'),
   },
   resolve: {
     //root:  path.resolve(__dirname, '..'),
