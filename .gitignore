@@ -1,14 +1,12 @@
-node_modules/
+**/dist/js/
+**/dist/shaders/
+**/dist/models/
 
-package-lock.json
+**/node_modules/
 
-/dist/
-/test/
-/webxr-samples-main/
-/intermediate/webgl-viewer.js
-/intermediate/webgl-viewer.js.map
-/intermediate/webgl-viewer.min.js
-/intermediate/webgl-viewer.min.js.map
+**/package-lock.json
+
+**/intermediate/
 
 /public/gltf/ford/ranger/
 /public/js/
