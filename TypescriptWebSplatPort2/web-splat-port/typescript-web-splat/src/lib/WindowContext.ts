@@ -1,82 +1,20 @@
-// lib.ts — 1:1 surface port of lib.rs adapted to your TS APIs
-// Updated: exact Rust FOVs at init + two-phase init (800x600 → real size)
-
 import { vec2, vec3, quat } from 'gl-matrix';
-import { GaussianRenderer, SplattingArgs, Display } from './renderer';
-import { PointCloud } from './pointcloud';
-import { Camera, PerspectiveCamera, PerspectiveProjection } from './camera';
-import { CameraController, KeyCode } from './controller';
-import * as io from './io/mod';
-import { Animation /*, TrackingShot, Transition*/ } from './animation';
-import { Scene, SceneCamera, Split } from './scene';
-// key_to_num imported but not used in this TS-only build (kept for 1:1 surface)
-import { key_to_num, GPUStopwatch } from './utils';
 
-// --- helpers to bridge {x,y,z} <-> gl-matrix tuples ---
-const v3 = (p: { x: number; y: number; z: number }): vec3 =>
-  vec3.fromValues(p.x, p.y, p.z);
-const near = (a: number, b: number, eps = 1e-4) => Math.abs(a - b) <= eps;
-const nearVec3 = (a: vec3, b: vec3, eps = 1e-4) =>
-  near(a[0], b[0], eps) && near(a[1], b[1], eps) && near(a[2], b[2], eps);
-const nearQuat = (a: quat, b: quat, eps = 1e-4) =>
-  near(a[0], b[0], eps) && near(a[1], b[1], eps) && near(a[2], b[2], eps) && near(a[3], b[3], eps);
+import { GaussianRenderer } from '../renderer/GaussianRenderer';
+import { Display } from '../renderer/Display';
+import type { SplattingArgs } from '../renderer/SplattingArgs';
 
-/* ------------------------------- No-op UI shims ------------------------------ */
-type FullOutput = unknown;
-class EguiWGPU {
-  constructor(_device: GPUDevice, _fmt: GPUTextureFormat, _canvas: HTMLCanvasElement) {}
-  begin_frame(_w: HTMLCanvasElement) {}
-  end_frame(_w: HTMLCanvasElement): FullOutput { return {}; }
-  prepare(_size: { width: number; height: number }, _scale: number, _dev: GPUDevice, _q: GPUQueue, _enc: GPUCommandEncoder, shapes: FullOutput) { return shapes; }
-  render(_pass: GPURenderPassEncoder, _state: FullOutput) {}
-  cleanup(_state: FullOutput) {}
-}
-const ui = { ui: (_wc: unknown) => false };
-/* --------------------------------------------------------------------------- */
-
-export class RenderConfig {
-  constructor(
-    public no_vsync: boolean,
-    public skybox: string | null = null,
-    public hdr: boolean = false
-  ) {}
-}
-
-export class WGPUContext {
-  device!: GPUDevice;
-  queue!: GPUQueue;
-  adapter!: GPUAdapter;
-
-  static async new_instance(): Promise<WGPUContext> {
-    return WGPUContext.new(undefined, undefined);
-  }
-
-  static async new(_instance?: unknown, _surface?: GPUCanvasContext | null): Promise<WGPUContext> {
-    if (!('gpu' in navigator)) throw new Error('WebGPU not available');
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error('No WebGPU adapter');
-
-    // Mirror wasm limits we rely on (keep permissive for browser portability)
-    const device = await adapter.requestDevice({
-      requiredLimits: { maxComputeWorkgroupStorageSize: 1 << 15 } // 32768
-    });
-
-    const ctx = new WGPUContext();
-    ctx.adapter = adapter;
-    ctx.device = device;
-    ctx.queue = device.queue;
-    return ctx;
-  }
-}
-
-type SurfaceConfiguration = {
-  format: GPUTextureFormat;
-  width: number;
-  height: number;
-  present_mode: 'auto' | 'auto-vsync' | 'auto-no-vsync';
-  alpha_mode: GPUCanvasAlphaMode;
-  view_formats: GPUTextureFormat[];
-};
+import { PointCloud } from '../pointcloud/PointCloud';
+import { PerspectiveCamera, PerspectiveProjection } from '../camera';
+import { CameraController } from '../controller';
+import * as io from '../io/mod';
+import { Animation } from '../animation';
+import { Scene, SceneCamera, Split } from '../scene';
+import { GPUStopwatch } from '../utils';
+import { RenderConfig } from './RenderConfig';
+import { WGPUContext } from './WGPUContext';
+import type { SurfaceConfiguration } from './SurfaceConfiguration';
+import { EguiWGPU, ui, v3, nearVec3, nearQuat, deSRGB } from './internal';
 
 export class WindowContext {
   private wgpu_context!: WGPUContext;
@@ -270,7 +208,7 @@ export class WindowContext {
     }
   }
 
-  ui(): [boolean, FullOutput] {
+  ui(): [boolean, import('./internal').FullOutput] {
     this.ui_renderer.begin_frame(this.window);
     const request_redraw = ui.ui(this);
     const shapes = this.ui_renderer.end_frame(this.window);
@@ -330,7 +268,7 @@ export class WindowContext {
     }
   }
 
-  render(redraw_scene: boolean, shapes?: FullOutput): void {
+  render(redraw_scene: boolean, shapes?: import('./internal').FullOutput): void {
     this.stopwatch?.reset();
 
     const texture = (this.surface as any).getCurrentTexture?.();
@@ -355,7 +293,7 @@ export class WindowContext {
       );
     }
 
-    let ui_state: FullOutput | null = null;
+    let ui_state: import('./internal').FullOutput | null = null;
     if (shapes) {
       // Use our tracked size + scale factor; some browsers don't expose texture.size here.
       ui_state = this.ui_renderer.prepare(
@@ -454,7 +392,6 @@ export class WindowContext {
     this._changed = true;
   }
 
-  // NEW: parity helper to jump to a scene camera (no animation for simplicity)
   private set_scene_camera(i: number): void {
     if (!this.scene) return;
     this.current_view = i;
@@ -526,258 +463,4 @@ export class WindowContext {
     );
     this.saved_cameras.push(cam);
   }
-}
-
-export function smoothstep(x: number): number {
-  return x * x * (3.0 - 2.0 * x);
-}
-
-/* --------------------------- input binding helper --------------------------- */
-
-function bind_input(canvas: HTMLCanvasElement, controller: CameraController) {
-  // Ensure keyboard focus can land on the canvas
-  if (!canvas.hasAttribute('tabindex')) canvas.tabIndex = 0;
-
-  let pressedPointerId: number | null = null;
-
-  const DEBUG = true; // flip to false to silence logs
-  const log = (...args: any[]) => { if (DEBUG) console.debug('[input]', ...args); };
-
-  const mapCode = (code: string): KeyCode | undefined => {
-    switch (code) {
-      case 'KeyW': case 'KeyS': case 'KeyA': case 'KeyD':
-      case 'ArrowUp': case 'ArrowDown': case 'ArrowLeft': case 'ArrowRight':
-      case 'KeyQ': case 'KeyE': case 'Space': case 'ShiftLeft':
-        return code as KeyCode;
-      default:
-        return undefined;
-    }
-  };
-
-  const updateAlt = (e: KeyboardEvent | PointerEvent | WheelEvent) => {
-    // Mirror winit's modifier tracking by sampling altKey on each event
-    // @ts-ignore
-    controller.alt_pressed = !!(e as any).altKey;
-  };
-
-  // Keyboard
-  const onKeyDown = (e: KeyboardEvent) => {
-    updateAlt(e);
-    const code = mapCode(e.code);
-    if (!code) return;
-    if (controller.process_keyboard(code, true)) {
-      log('keydown', code);
-      e.preventDefault();
-    }
-  };
-  const onKeyUp = (e: KeyboardEvent) => {
-    updateAlt(e);
-    const code = mapCode(e.code);
-    if (!code) return;
-    if (controller.process_keyboard(code, false)) {
-      log('keyup', code);
-      e.preventDefault();
-    }
-  };
-
-  // Pointer (mouse/touch/pen)
-  const onPointerDown = (e: PointerEvent) => {
-    updateAlt(e);
-    canvas.focus();
-    pressedPointerId = e.pointerId;
-    try { canvas.setPointerCapture(e.pointerId); } catch {}
-    if (e.button === 0) controller.left_mouse_pressed  = true;
-    if (e.button === 2) controller.right_mouse_pressed = true;
-    log('pointerdown', e.button, 'alt=', controller.alt_pressed);
-    e.preventDefault();
-  };
-  const onPointerMove = (e: PointerEvent) => {
-    updateAlt(e);
-    const dx = e.movementX ?? 0;
-    const dy = e.movementY ?? 0;
-    if (controller.left_mouse_pressed || controller.right_mouse_pressed) {
-      controller.process_mouse(dx, dy);
-      log('pointermove', dx, dy);
-      e.preventDefault();
-    }
-  };
-  const onPointerUp = (e: PointerEvent) => {
-    updateAlt(e);
-    if (pressedPointerId === e.pointerId) {
-      try { canvas.releasePointerCapture(e.pointerId); } catch {}
-      pressedPointerId = null;
-    }
-    if (e.button === 0) controller.left_mouse_pressed  = false;
-    if (e.button === 2) controller.right_mouse_pressed = false;
-    log('pointerup', e.button);
-    e.preventDefault();
-  };
-
-  // Prevent browser context menu so right-drag pans like in Rust
-  const onContextMenu = (e: MouseEvent) => { e.preventDefault(); };
-
-  // Wheel
-  const onWheel = (e: WheelEvent) => {
-    updateAlt(e);
-    controller.process_scroll(e.deltaY / 100);
-    log('wheel', e.deltaY);
-    e.preventDefault(); // stop page scroll
-  };
-
-  // Blur: clear pressed flags similar to losing focus in winit
-  const onWindowBlur = () => {
-    controller.left_mouse_pressed = false;
-    controller.right_mouse_pressed = false;
-  };
-
-  // Attach
-  window.addEventListener('keydown', onKeyDown, { capture: true });
-  window.addEventListener('keyup', onKeyUp, { capture: true });
-  window.addEventListener('blur', onWindowBlur);
-
-  canvas.addEventListener('pointerdown', onPointerDown);
-  canvas.addEventListener('pointermove', onPointerMove);
-  canvas.addEventListener('pointerup', onPointerUp);
-  canvas.addEventListener('contextmenu', onContextMenu);
-  canvas.addEventListener('wheel', onWheel, { passive: false });
-
-  // Return unbind if you need teardown later
-  return () => {
-    window.removeEventListener('keydown', onKeyDown, { capture: true } as any);
-    window.removeEventListener('keyup', onKeyUp, { capture: true } as any);
-    window.removeEventListener('blur', onWindowBlur);
-
-    canvas.removeEventListener('pointerdown', onPointerDown);
-    canvas.removeEventListener('pointermove', onPointerMove);
-    canvas.removeEventListener('pointerup', onPointerUp);
-    canvas.removeEventListener('contextmenu', onContextMenu);
-    canvas.removeEventListener('wheel', onWheel as any);
-  };
-}
-
-/* --------------------------------------------------------------------------- */
-
-export async function open_window(
-  file: any,
-  scene: any | null,
-  config: RenderConfig,
-  pointcloud_file_path: string | null,
-  scene_file_path: string | null
-): Promise<void> {
-  const canvas = (document.getElementById('window-canvas') as HTMLCanvasElement) ??
-    (() => {
-      const c = document.createElement('canvas');
-      c.id = 'window-canvas';
-      c.style.width = '100%';
-      c.style.height = '100%';
-      document.body.appendChild(c);
-      return c;
-    })();
-
-  // Real backing store = CSS * DPR (what we *actually* want to render)
-  const backingFromCss = () => {
-    const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    return {
-      w: Math.max(1, Math.floor(rect.width  * dpr)),
-      h: Math.max(1, Math.floor(rect.height * dpr)),
-      dpr
-    };
-  };
-
-  // --- TWO-PHASE INIT to mimic Rust ---
-  // Phase 0: capture real size we’ll use *after* initialization.
-  const { w: realW, h: realH, dpr: realDpr } = backingFromCss();
-
-  // Phase 1: initialize at 800x600 like Rust does before the wasm canvas resize.
-  const initW = 800, initH = 600;
-  canvas.width = initW;
-  canvas.height = initH;
-
-  const state = await WindowContext.new(canvas, file, config);
-
-  const _unbindInput = bind_input(canvas, (state as any)['controller'] as CameraController);
-
-  // Phase 2: immediately resize to the real backing-store size
-  const applyRealSize = () => {
-    const now = backingFromCss();
-    if (canvas.width !== now.w)  canvas.width  = now.w;
-    if (canvas.height !== now.h) canvas.height = now.h;
-    state.resize({ width: now.w, height: now.h }, now.dpr);
-  };
-  applyRealSize();
-
-  const ro = new ResizeObserver(applyRealSize);
-  ro.observe(canvas);
-  addEventListener('resize', applyRealSize, { passive: true });
-  addEventListener('orientationchange', applyRealSize, { passive: true });
-
-  (state as any).pointcloud_file_path = pointcloud_file_path;
-
-  if (scene) {
-    try {
-      const s = await (Scene as any).fromJson(scene);
-      (state as any)['set_scene'](s);
-      // NEW: switch to scene camera 0 like Rust
-      (state as any)['set_scene_camera']?.(0);
-      (state as any).scene_file_path = scene_file_path;
-    } catch (err) {
-      console.error('cannot load scene:', err);
-    }
-  }
-
-  if (config.skybox) {
-    try {
-      await (state as any)['set_env_map'](config.skybox);
-    } catch (e) {
-      console.error('failed to set skybox:', e);
-    }
-  }
-
-  let last = performance.now();
-  const loop = () => {
-    const now = performance.now();
-    const dt = (now - last) / 1000.0;
-    last = now;
-
-    (state as any).update(dt);
-
-    const [redraw_ui, shapes] = (state as any).ui();
-    const res = (state as any)['splatting_args'].resolution as Float32Array | [number, number];
-    const resChange =
-      (res as any)[0] !== (state as any)['config'].width ||
-      (res as any)[1] !== (state as any)['config'].height;
-
-    const request_redraw = (state as any)._changed || resChange;
-
-    if (request_redraw || redraw_ui) {
-      (state as any)['fps'] = (1.0 / Math.max(1e-6, dt)) * 0.05 + (state as any)['fps'] * 0.95;
-      (state as any).render(request_redraw, (state as any)['ui_visible'] ? shapes : undefined);
-    }
-    requestAnimationFrame(loop);
-  };
-  requestAnimationFrame(loop);
-}
-
-export async function run_wasm(
-  pc: ArrayBuffer,
-  scene: ArrayBuffer | null,
-  pc_file: string | null,
-  scene_file: string | null
-): Promise<void> {
-  await open_window(
-    pc,
-    scene,
-    new RenderConfig(false, null, false),
-    pc_file,
-    scene_file
-  );
-}
-
-/* --------------------------------- helpers --------------------------------- */
-
-function deSRGB(fmt: GPUTextureFormat): GPUTextureFormat {
-  if (fmt === 'bgra8unorm-srgb') return 'bgra8unorm';
-  if (fmt === 'rgba8unorm-srgb') return 'rgba8unorm';
-  return fmt;
 }

@@ -9,12 +9,9 @@
 
 import { unzipSync } from 'fflate';
 
-import {
-  Covariance3D,
-  GaussianCompressed,
-  GaussianQuantization,
-  Quantization,
-} from '../pointcloud';
+import type { Covariance3D, GaussianCompressed } from '../pointcloud/types';
+import type { GaussianQuantization } from '../pointcloud/quantization';
+
 import { buildCovScalar, shDegFromNumCoefs, shNumCoefficients } from '../utils';
 import { GenericGaussianPointCloud, PointCloudReader } from './mod';
 

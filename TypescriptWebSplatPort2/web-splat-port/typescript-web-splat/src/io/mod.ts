@@ -1,15 +1,15 @@
 // io/mod.ts
 // 1:1 port of src/io/mod.rs (with TS-friendly types)
 
-import {
-  Aabb,
+import { Aabb } from '../pointcloud/aabb';
+import type {
   Gaussian,
   GaussianCompressed,
   Covariance3D,
-  GaussianQuantization,
   Point3f32,
   Vector3f32,
-} from '../pointcloud';
+} from '../pointcloud/types';
+import type { GaussianQuantization } from '../pointcloud/quantization';
 
 import { PlyReader } from './ply';
 import { NpzReader, ZipNpzArchive } from './npz'; 

@@ -3,7 +3,7 @@
 // computes bbox + plane (center/up) in one pass, and avoids gl-matrix allocations.
 
 import { buildCovScalar, shDegFromNumCoefs, sigmoid } from '../utils';
-import { Aabb } from '../pointcloud';
+import { Aabb } from '../pointcloud/aabb';
 import { GenericGaussianPointCloud } from './mod';
 
 /* -------------------------------------------------------------------------- */
