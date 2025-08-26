@@ -1,6 +1,12 @@
 const KERNEL_SIZE:f32 = 0.3;
 //const MAX_SH_DEG:u32 = <injected>u;
 
+// Culling pads for the preprocess step (projection doesn’t change).
+// We keep a splat if |x_ndc| <= CULL_PAD_X and |y_ndc| <= CULL_PAD_Y.
+// 1.0 = normal culling; 2.0 ≈ twice as wide; bigger = fewer pop-outs, more work.
+const CULL_PAD_X:f32 = 2.0;
+const CULL_PAD_Y:f32 = 2.0;
+
 const SH_C0:f32 = 0.28209479177387814;
 
 const SH_C1 = 0.4886025119029199;
@@ -22,13 +28,11 @@ const SH_C3 = array<f32,7>(
     -0.5900435899266435
 );
 
-
 struct CameraUniforms {
     view: mat4x4<f32>,
     view_inv: mat4x4<f32>,
     proj: mat4x4<f32>,
     proj_inv: mat4x4<f32>,
-    
     viewport: vec2<f32>,
     focal: vec2<f32>
 };
@@ -39,7 +43,7 @@ struct Gaussian {
 }
 
 struct Splat {
-     // 4x f16 packed as u32
+    // 4x f16 packed as u32
     v_0: u32, v_1: u32,
     // 2x f16 packed as u32
     pos: u32,
@@ -109,15 +113,12 @@ var<storage, read_write> sort_dispatch: DispatchIndirect;
 @group(3) @binding(0)
 var<uniform> render_settings: RenderSettings;
 
-
 /// reads the ith sh coef from the vertex buffer
 fn sh_coef(splat_idx: u32, c_idx: u32) -> vec3<f32> {
     let a = unpack2x16float(sh_coefs[splat_idx][(c_idx * 3u + 0u) / 2u])[(c_idx * 3u + 0u) % 2u];
     let b = unpack2x16float(sh_coefs[splat_idx][(c_idx * 3u + 1u) / 2u])[(c_idx * 3u + 1u) % 2u];
     let c = unpack2x16float(sh_coefs[splat_idx][(c_idx * 3u + 2u) / 2u])[(c_idx * 3u + 2u) % 2u];
-    return vec3<f32>(
-        a, b, c
-    );
+    return vec3<f32>(a, b, c);
 }
 
 // spherical harmonics evaluation with Condon–Shortley phase
@@ -181,16 +182,20 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
 
     var camspace = camera.view * vec4<f32>(xyz, 1.);
     let pos2d = camera.proj * camspace;
-    let bounds = 1.2 * pos2d.w;
     let z = pos2d.z / pos2d.w;
 
     if idx == 0u {
         atomicAdd(&sort_dispatch.dispatch_x, 1u);   // safety addition to always have an unfull block at the end of the buffer
     }
-    // frustum culling hack
-    if z <= 0. || z >= 1. || pos2d.x < -bounds || pos2d.x > bounds || pos2d.y < -bounds || pos2d.y > bounds {
+
+    // --- widened frustum culling: scale clip bounds by CULL_PAD_X/Y ---
+    let boundX = CULL_PAD_X * pos2d.w;
+    let boundY = CULL_PAD_Y * pos2d.w;
+
+    if z <= 0. || z >= 1. || pos2d.x < -boundX || pos2d.x > boundX || pos2d.y < -boundY || pos2d.y > boundY {
         return;
     }
+    // ------------------------------------------------------------------
 
     let cov_sparse = cov_coefs(idx);
 
