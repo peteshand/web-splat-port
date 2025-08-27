@@ -2,11 +2,11 @@ package webgpu;
 
 @:native("GPUCanvasContext") extern class GPUCanvasContext {
 	function new();
-	final __brand : String;
+	public static final __brand : String;
 	/**
 		The canvas this context was created from.
 	**/
-	final canvas : ts.AnyOf2<js.html.CanvasElement, js.html.OffscreenCanvas>;
+	public static final canvas : ts.AnyOf2<js.html.CanvasElement, js.html.OffscreenCanvas>;
 	/**
 		Configures the context for this canvas.
 		This clears the drawing buffer to transparent black (in [$Replace the drawing buffer$]).

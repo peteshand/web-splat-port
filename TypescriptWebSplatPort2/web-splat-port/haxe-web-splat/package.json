@@ -9,7 +9,11 @@
     "build-haxe": "node ./scripts/compile",
     "build-webpack": "cross-env NODE_OPTIONS=--openssl-legacy-provider npx webpack --config webpack.config.js",
     "build": "npm run build-haxe && npm run build-webpack && npm run copy-shaders",
-    "start": "npm run build && cd ./public/ && http-server ."
+    "start": "npm run build && cd ./dist/ && http-server ."
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "gl-matrix": "^3.4.3"
   },
   "devDependencies": {
     "chalk": "4.1.0",

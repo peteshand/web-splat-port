@@ -18,7 +18,6 @@
 -cp src
 -cp libs
 -cp externs
--cp externs_mw
 
 --macro build.Build.embedAllCss("src")
 --macro build.Build.embedAllJson("src")

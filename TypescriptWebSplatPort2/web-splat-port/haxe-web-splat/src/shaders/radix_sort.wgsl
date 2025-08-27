@@ -46,7 +46,7 @@ var<storage, read_write> payload_b : array<u32>;
 // Filling histograms and keys with default values (also resets the pass infos for odd and even scattering)
 // --------------------------------------------------------------------------------------------------------------
 @compute @workgroup_size({histogram_wg_size})
-fn zero_histograms(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+fn zero_histograms(@builtin(global_invocation_id) gid : Vec3<u32>, @builtin(num_workgroups) nwg: Vec3<u32>) {
     if gid.x == 0u {
         infos.even_pass = 0u;
         infos.odd_pass = 1u;    // has to be one, as on the first call to even pass + 1 % 2 is calculated
@@ -126,7 +126,7 @@ fn fill_kv_keys_b(wid: u32, lid: u32) {
     }
 }
 @compute @workgroup_size({histogram_wg_size})
-fn calculate_histogram(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_id) lid : vec3<u32>) {
+fn calculate_histogram(@builtin(workgroup_id) wid : Vec3<u32>, @builtin(local_invocation_id) lid : Vec3<u32>) {
     // efficient loading of multiple values
     fill_kv(wid.x, lid.x);
     
@@ -179,7 +179,7 @@ fn prefix_reduce_smem(lid: u32) {
     }
 }
 @compute @workgroup_size({prefix_wg_size})
-fn prefix_histogram(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid : vec3<u32>) {
+fn prefix_histogram(@builtin(workgroup_id) wid: Vec3<u32>, @builtin(local_invocation_id) lid : Vec3<u32>) {
     // the work group  id is the pass, and is inverted in the next line, such that pass 3 is at the first position in the histogram buffer
     let histogram_base = (rs_keyval_size - 1u - wid.x) * rs_radix_size;
     let histogram_offset = histogram_base + lid.x;
@@ -265,7 +265,7 @@ fn fill_kv_odd(wid: u32, lid: u32) {
         pv[i] = payload_b[pos];
     }
 }
-fn scatter(pass_: u32, lid: vec3<u32>, gid: vec3<u32>, wid: vec3<u32>, nwg: vec3<u32>, partition_status_invalid: u32, partition_status_reduction: u32, partition_status_prefix: u32) {
+fn scatter(pass_: u32, lid: Vec3<u32>, gid: Vec3<u32>, wid: Vec3<u32>, nwg: Vec3<u32>, partition_status_invalid: u32, partition_status_reduction: u32, partition_status_prefix: u32) {
     let partition_mask_invalid = partition_status_invalid << 30u;
     let partition_mask_reduction = partition_status_reduction << 30u;
     let partition_mask_prefix = partition_status_prefix << 30u;
@@ -463,7 +463,7 @@ fn scatter(pass_: u32, lid: vec3<u32>, gid: vec3<u32>, wid: vec3<u32>, nwg: vec3
     // the storing is done in the scatter_even and scatter_odd functions as the front and back buffer changes
 }
 @compute @workgroup_size({scatter_wg_size})
-fn scatter_even(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+fn scatter_even(@builtin(workgroup_id) wid: Vec3<u32>, @builtin(local_invocation_id) lid: Vec3<u32>, @builtin(global_invocation_id) gid: Vec3<u32>, @builtin(num_workgroups) nwg: Vec3<u32>) {
     if gid.x == 0u {
         infos.odd_pass = (infos.odd_pass + 1u) % 2u; // for this to work correctly the odd_pass has to start 1
     }
@@ -486,7 +486,7 @@ fn scatter_even(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation
     }
 }
 @compute @workgroup_size({scatter_wg_size})
-fn scatter_odd(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+fn scatter_odd(@builtin(workgroup_id) wid: Vec3<u32>, @builtin(local_invocation_id) lid: Vec3<u32>, @builtin(global_invocation_id) gid: Vec3<u32>, @builtin(num_workgroups) nwg: Vec3<u32>) {
     if gid.x == 0u {
         infos.even_pass = (infos.even_pass + 1u) % 2u; // for this to work correctly the even_pass has to start at 0
     }

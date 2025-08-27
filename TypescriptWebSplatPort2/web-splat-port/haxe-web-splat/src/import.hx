@@ -1,18 +1,50 @@
 #if !macro
 
-
-
-
-
 import js.Browser;
 import js.Browser.console;
 import js.Browser.navigator;
 import js.Browser.document;
 import js.Browser.window;
 //
+import webgpu.*;
+import gl_matrix.*;
+import fflate.*;
+//
+import lib.*;
+import io.*;
+import scene.*;
+import utils.*;
+import gpu.*;
+import uniform.*;
+import animation.*;
+import controller.*;
+//
+import renderer.*;
+import renderer.SplattingArgs.SplattingArgsConst;
+//
+import camera.*;
+import camera.Internal;
+import camera.Types.Camera;
+import camera.Types.FrustumPlanes;
+//
+import pointcloud.*;
+import pointcloud.Types.Point3f32;
+import pointcloud.Types.Vector3f32;
+import pointcloud.Types.Gaussian;
+import pointcloud.Types.GaussianCompressed;
+import pointcloud.Types.Covariance3D;
+import pointcloud.Types.ABOrView;
+import pointcloud.Types.QuantViewOrStruct;
+//
 import js.lib.Promise;
+import js.lib.ArrayBuffer;
+import js.lib.ArrayBufferView;
+//
+import js.html.Float32Array;
 import js.html.Element;
 import js.html.Event;
+import js.html.KeyboardEvent;
+import js.html.WheelEvent;
 import js.html.MouseEvent;
 import js.html.PointerEvent;
 import js.html.HtmlElement;
@@ -31,5 +63,9 @@ import js.html.OrientationLockType;
 import haxe.Json;
 import haxe.Timer;
 import haxe.Resource;
+import Reflect;
+import Type;
+//
+using utils.MapTools;
 //
 #end

@@ -1,9 +1,9 @@
 package webgpu;
 
 @:native("GPUTextureUsage") extern class GPUTextureUsage {
-	final COPY_SRC : Float;
-	final COPY_DST : Float;
-	final TEXTURE_BINDING : Float;
-	final STORAGE_BINDING : Float;
-	final RENDER_ATTACHMENT : Float;
+	public static final COPY_SRC : Int;
+	public static final COPY_DST : Int;
+	public static final TEXTURE_BINDING : Int;
+	public static final STORAGE_BINDING : Int;
+	public static final RENDER_ATTACHMENT : Int;
 }

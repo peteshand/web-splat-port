@@ -1,9 +1,13 @@
 package build;
 
-#if macro
 import haxe.macro.Context;
 import sys.FileSystem;
 import sys.io.File;
+
+
+
+
+#if macro
 using StringTools;
 
 class Build {

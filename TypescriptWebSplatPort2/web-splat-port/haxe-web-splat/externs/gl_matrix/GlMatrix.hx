@@ -1,23 +1,31 @@
 package gl_matrix;
 
-@:jsRequire("gl-matrix", "glMatrix") @valueModuleOnly extern class GlMatrix {
-	/**
-		Sets the type of array used when creating new vectors and matrices
-	**/
-	static function setMatrixArrayType(type:ts.AnyOf2<js.lib.ArrayConstructor, js.lib.Float32ArrayConstructor>):Void;
-	/**
-		Convert Degree To Radian
-	**/
-	static function toRadian(a:Float):Float;
-	/**
-		Tests whether or not the arguments have approximately the same value, within an absolute
-		or relative tolerance of glMatrix.EPSILON (an absolute tolerance is used for values less
-		than or equal to 1.0, and a relative tolerance is used for larger values)
-	**/
-	static function equals(a:Float, b:Float):Bool;
-	/**
-		Common utilities
-	**/
-	static final EPSILON : Float;
-	static function RANDOM():Float;
+@:jsRequire("gl-matrix", "glMatrix") @valueModuleOnly
+extern class GlMatrix {
+  /**
+   * Use only Float32Array for vectors/matrices to match our abstracts.
+   */
+  static function setMatrixArrayType(type:js.lib.Float32ArrayConstructor):Void;
+
+  /** Convert Degree To Radian */
+  static function toRadian(a:Float):Float;
+
+  /**
+   * Approx-equality with tolerance based on glMatrix.EPSILON.
+   */
+  static function equals(a:Float, b:Float):Bool;
+
+  /** Common utilities */
+  static final EPSILON:Float;
+
+  /**
+   * Random number source (override-able). Exposed as a function value.
+   */
+  static var RANDOM:()->Float;
+
+  /**
+   * Optional: expose the constructor gl-matrix uses internally.
+   * Keep it Float32ArrayConstructor to align with our design.
+   */
+  // static var ARRAY_TYPE(default, null):js.lib.Float32ArrayConstructor;
 }

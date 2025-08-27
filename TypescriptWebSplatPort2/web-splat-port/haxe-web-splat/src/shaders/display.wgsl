@@ -7,8 +7,8 @@ struct CameraUniforms {
     proj: mat4x4<f32>,
     proj_inv: mat4x4<f32>,
     
-    viewport: vec2<f32>,
-    focal: vec2<f32>
+    viewport: Vec2<f32>,
+    focal: Vec2<f32>
 };
 
 
@@ -35,8 +35,8 @@ var<uniform> render_settings: RenderSettings;
 
 
 struct VertexOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) tex_coord: vec2<f32>,
+    @builtin(position) pos: Vec4<f32>,
+    @location(0) tex_coord: Vec2<f32>,
 }
 
 @vertex
@@ -45,26 +45,26 @@ fn vs_main(
 ) -> VertexOut {
 
     // creates two vertices that cover the whole screen
-    let xy = vec2<f32>(
+    let xy = Vec2<f32>(
         f32(in_vertex_index % 2u == 0u),
         f32(in_vertex_index < 2u)
     );
-    return VertexOut(vec4<f32>(xy * 2. - (1.), 0., 1.), vec2<f32>(xy.x, 1. - xy.y));
+    return VertexOut(Vec4<f32>(xy * 2. - (1.), 0., 1.), Vec2<f32>(xy.x, 1. - xy.y));
 }
 
-fn sample_env_map(dir: vec3<f32>) -> vec4<f32> {
-    let texcoord = vec2<f32>(atan2(dir.z, dir.x) / TWO_PI + 0.5, -asin(dir.y) / PI + 0.5);
+fn sample_env_map(dir: Vec3<f32>) -> Vec4<f32> {
+    let texcoord = Vec2<f32>(atan2(dir.z, dir.x) / TWO_PI + 0.5, -asin(dir.y) / PI + 0.5);
     return textureSample(env_map, env_map_sampler, texcoord);
 }
 
 @fragment
-fn fs_main(vertex_in: VertexOut) -> @location(0) vec4<f32> {
+fn fs_main(vertex_in: VertexOut) -> @location(0) Vec4<f32> {
     let color = textureSample(source_img, texture_sampler, vertex_in.tex_coord);
     if render_settings.show_env_map == 1u {
-        let local_pos = camera.proj_inv * vec4<f32>((vertex_in.tex_coord.xy * 2. - (1.)), 1., 1.);
-        let dir = camera.view_inv * vec4<f32>(local_pos.xyz, 0.);
+        let local_pos = camera.proj_inv * Vec4<f32>((vertex_in.tex_coord.xy * 2. - (1.)), 1., 1.);
+        let dir = camera.view_inv * Vec4<f32>(local_pos.xyz, 0.);
         let env_color = sample_env_map(normalize(dir.xyz));
-        return vec4<f32>(env_color.rgb * (1. - color.a) + color.rgb, 1.);
+        return Vec4<f32>(env_color.rgb * (1. - color.a) + color.rgb, 1.);
     } else {
         return color;
     }

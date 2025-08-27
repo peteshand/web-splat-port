@@ -1,7 +1,7 @@
 package webgpu;
 
 @:native("GPUShaderStage") extern class GPUShaderStage {
-	final VERTEX : Float;
-	final FRAGMENT : Float;
-	final COMPUTE : Float;
+	public static final VERTEX : Int;
+	public static final FRAGMENT : Int;
+	public static final COMPUTE : Int;
 }
