@@ -13,11 +13,16 @@ import fflate.*;
 import lib.*;
 import io.*;
 import scene.*;
-import utils.*;
 import gpu.*;
 import uniform.*;
 import animation.*;
 import controller.*;
+//
+import utils.*;
+import utils.Utils.buildCovScalar;
+import utils.Utils.shDegFromNumCoefs;
+import utils.Utils.shNumCoefficients;
+import utils.Utils.sigmoid;
 //
 import renderer.*;
 import renderer.SplattingArgs.SplattingArgsConst;
@@ -40,6 +45,8 @@ import js.lib.Promise;
 import js.lib.ArrayBuffer;
 import js.lib.ArrayBufferView;
 //
+import js.html.TextEncoder;
+import js.html.TextDecoder;
 import js.html.Float32Array;
 import js.html.Element;
 import js.html.Event;
@@ -68,4 +75,7 @@ import Type;
 //
 using utils.MapTools;
 //
+using utils.ArrayTools;
+using utils.MapTools;
+using StringTools;
 #end

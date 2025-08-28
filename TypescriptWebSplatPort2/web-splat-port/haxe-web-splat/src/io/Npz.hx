@@ -5,7 +5,6 @@ package io;
 import haxe.DynamicAccess;
 import pointcloud.Types;
 import pointcloud.Quantization;
-import Utils; // expects: buildCovScalar, shDegFromNumCoefs, shNumCoefficients
 import io.Mod.GenericGaussianPointCloud;
 import io.Mod.PointCloudReader;
 
@@ -20,13 +19,14 @@ interface INpzArchive {
 /* -------------------------- Concrete NPZ archive --------------------------- */
 
 class ZipNpzArchive implements INpzArchive {
-  var parsed:Map<String, INpzArray<Dynamic>> = [];
-  var raw:Map<String, js.lib.Uint8Array> = [];
+  var parsed:Map<String, INpzArray<Dynamic>> = new Map();
+  var raw:Map<String, js.lib.Uint8Array> = new Map();
 
   function new() {}
 
   public static function fromArrayBuffer(buf:js.lib.ArrayBuffer):ZipNpzArchive {
-    final files:DynamicAccess<js.lib.Uint8Array> = js.Syntax.code("require('fflate').unzipSync({0})", new js.lib.Uint8Array(buf));
+    final files:DynamicAccess<js.lib.Uint8Array> =
+      js.Syntax.code("require('fflate').unzipSync({0})", new js.lib.Uint8Array(buf));
     final z = new ZipNpzArchive();
     for (name in files.keys()) {
       if (!StringTools.endsWith(name, ".npy")) continue;
@@ -62,7 +62,7 @@ private function parseNPY(bytes:js.lib.Uint8Array):NpyParsed {
   if (verMajor == 1) { headerLen = bytes[8] | (bytes[9] << 8); headerOfs = 10; }
   else { headerLen = (bytes[8]) | (bytes[9] << 8) | (bytes[10] << 16) | (bytes[11] << 24); headerOfs = 12; }
 
-  final headerText = new js.lib.TextDecoder("ascii").decode(bytes.subarray(headerOfs, headerOfs + headerLen));
+  final headerText = new TextDecoder("ascii").decode(bytes.subarray(headerOfs, headerOfs + headerLen));
   final descr = match1(headerText, ~/'descr'\s*:\s*'([^']+)'/);
   final fortran = (match1(headerText, ~/'fortran_order'\s*:\s*(True|False)/) == "True");
   final shapeStr = match1(headerText, ~/'shape'\s*:\s*\(([^)]*)\)/);
@@ -74,11 +74,11 @@ private function parseNPY(bytes:js.lib.Uint8Array):NpyParsed {
   final raw = bytes.subarray(dataOfs);
 
   final big = StringTools.startsWith(descr, ">");
-  final type = descr.substr(1); // e.g., i1,i4,f4,f8,f2,b1
+  final dtype = descr.substr(1); // e.g., i1,i4,f4,f8,f2,b1
   final needSwap = big;
 
   var out:Dynamic;
-  switch (type) {
+  switch (dtype) {
     case "i1":
       out = new js.lib.Int8Array(raw.buffer, raw.byteOffset, raw.byteLength);
     case "i4":
@@ -152,30 +152,57 @@ private var __f32v = new js.lib.Float32Array(__f32_buf);
 private var __u32v = new js.lib.Uint32Array(__f32_buf);
 private inline function f32_to_f16_fast(val:Float):Int {
   __f32v[0] = val;
-  final x = __u32v[0];
+  var x:Int = __u32v[0];
 
-  final sign = (x >>> 16) & 0x8000;
-  var exp  = (x >>> 23) & 0xff;
-  var mant = x & 0x007fffff;
+  var sign:Int = (x >>> 16) & 0x8000;
+  var exp:Int  = (x >>> 23) & 0xff;
+  var mant:Int = x & 0x007fffff;
 
-  if (exp == 0xff) return sign | 0x7c00 | (mant != 0 ? 1 : 0);
-  if (exp == 0) return sign;
+  var out:Int;
 
-  var e = exp - 112;
-  if (e <= 0) {
-    if (e < -10) return sign;
-    mant = (mant | 0x00800000) >>> (1 - e);
-    if ((mant & 0x00001000) != 0) mant += 0x00002000;
-    return sign | (mant >>> 13);
+  if (exp == 0xff) {
+    // Inf/NaN
+    out = sign | 0x7c00 | (mant != 0 ? 1 : 0);
+  } else if (exp == 0) {
+    // Zero / subnormal maps to signed zero
+    out = sign;
+  } else {
+    var e:Int = exp - 112; // 127 - 15
+    if (e <= 0) {
+      if (e < -10) {
+        out = sign;
+      } else {
+        mant = (mant | 0x00800000) >>> (1 - e);
+        if ((mant & 0x00001000) != 0) mant += 0x00002000;
+        out = sign | (mant >>> 13);
+      }
+    } else if (e >= 0x1f) {
+      // Overflow -> Inf
+      out = sign | 0x7c00;
+    } else {
+      if ((mant & 0x00001000) != 0) {
+        mant += 0x00002000;
+        if ((mant & 0x00800000) != 0) {
+          mant = 0;
+          e += 1;
+          if (e >= 0x1f) {
+            out = sign | 0x7c00;
+            // fall through to final return
+          } else {
+            out = sign | (e << 10) | ((mant >>> 13) & 0x03ff);
+          }
+        } else {
+          out = sign | (e << 10) | ((mant >>> 13) & 0x03ff);
+        }
+      } else {
+        out = sign | (e << 10) | ((mant >>> 13) & 0x03ff);
+      }
+    }
   }
-  if (e >= 0x1f) return sign | 0x7c00;
 
-  if ((mant & 0x00001000) != 0) {
-    mant += 0x00002000;
-    if ((mant & 0x00800000) != 0) { mant = 0; e += 1; if (e >= 0x1f) return sign | 0x7c00; }
-  }
-  return sign | (e << 10) | ((mant >>> 13) & 0x03ff);
+  return out;
 }
+
 
 /* -------------------------------- Reader ---------------------------------- */
 
@@ -191,69 +218,72 @@ class NpzReader implements PointCloudReader {
 
     // infer sh_deg from features_rest width (+1)
     var deg = 0;
-    final rest = this.npzFile.byName<Float>("features_rest");
+    final rest = this.npzFile.byName("features_rest");
     if (rest != null) {
       final width = (rest.shape.length > 1 ? rest.shape[1] : 0);
-      final maybeDeg = Utils.shDegFromNumCoefs(width + 1);
+      final maybeDeg = shDegFromNumCoefs(width + 1);
       if (maybeDeg == null) throw "num sh coefs not valid";
       deg = maybeDeg;
     }
     this.sh_deg = deg;
 
-    this.kernel_size    = get_npz_value<Float>(this.npzFile, 'kernel_size');
-    final ms            = get_npz_value<Float>(this.npzFile, 'mip_splatting');
+    this.kernel_size    = get_npz_value(this.npzFile, "kernel_size");
+    final ms            = get_npz_value(this.npzFile, "mip_splatting");
     this.mip_splatting  = (ms == null) ? null : (ms != 0);
 
-    final bg = get_npz_array_optional<Float>(this.npzFile, 'background_color');
+    final bg = get_npz_array_optional(this.npzFile, "background_color");
     this.background_color = bg != null ? [bg[0], bg[1], bg[2]] : null;
   }
 
-  public static function magic_bytes():js.lib.Uint8Array return new js.lib.Uint8Array(js.Syntax.code("[0x50,0x4B,0x03,0x04]"));
+  public static function magic_bytes():js.lib.Uint8Array
+    return new js.lib.Uint8Array(js.Syntax.code("[0x50,0x4B,0x03,0x04]"));
   public static function file_ending():String return "npz";
+
+  private inline function nz(v:Null<Float>, d:Float):Float return (v != null) ? v : d;
 
   public function read():GenericGaussianPointCloud {
     // decode scalar metadata
-    final opacity_scale        = get_npz_value<Float>(this.npzFile, 'opacity_scale')        ?? 1.0;
-    final opacity_zero_point   = get_npz_value<Float>(this.npzFile, 'opacity_zero_point')   ?? 0;
+    final opacity_scale        = nz(get_npz_value(this.npzFile, "opacity_scale"),        1.0);
+    final opacity_zero_point   = nz(get_npz_value(this.npzFile, "opacity_zero_point"),   0.0);
 
-    final scaling_scale        = get_npz_value<Float>(this.npzFile, 'scaling_scale')        ?? 1.0;
-    final scaling_zero_point   = get_npz_value<Float>(this.npzFile, 'scaling_zero_point')   ?? 0;
+    final scaling_scale        = nz(get_npz_value(this.npzFile, "scaling_scale"),        1.0);
+    final scaling_zero_point   = nz(get_npz_value(this.npzFile, "scaling_zero_point"),   0.0);
 
-    final rotation_scale       = get_npz_value<Float>(this.npzFile, 'rotation_scale')       ?? 1.0;
-    final rotation_zero_point  = get_npz_value<Float>(this.npzFile, 'rotation_zero_point')  ?? 0;
+    final rotation_scale       = nz(get_npz_value(this.npzFile, "rotation_scale"),       1.0);
+    final rotation_zero_point  = nz(get_npz_value(this.npzFile, "rotation_zero_point"),  0.0);
 
-    final features_dc_scale        = get_npz_value<Float>(this.npzFile, 'features_dc_scale')        ?? 1.0;
-    final features_dc_zero_point   = get_npz_value<Float>(this.npzFile, 'features_dc_zero_point')   ?? 0;
+    final features_dc_scale        = nz(get_npz_value(this.npzFile, "features_dc_scale"),        1.0);
+    final features_dc_zero_point   = nz(get_npz_value(this.npzFile, "features_dc_zero_point"),   0.0);
 
-    final features_rest_scale      = get_npz_value<Float>(this.npzFile, 'features_rest_scale')      ?? 1.0;
-    final features_rest_zero_point = get_npz_value<Float>(this.npzFile, 'features_rest_zero_point') ?? 0;
+    final features_rest_scale      = nz(get_npz_value(this.npzFile, "features_rest_scale"),      1.0);
+    final features_rest_zero_point = nz(get_npz_value(this.npzFile, "features_rest_zero_point"), 0.0);
 
     // arrays WITH shapes
-    final xyzArr          = must_get_arr<Float>(this.npzFile, 'xyz');
-    final opacityArr      = must_get_arr<Float>(this.npzFile, 'opacity');
-    final scalingArr      = must_get_arr<Float>(this.npzFile, 'scaling');
-    final rotationArr     = must_get_arr<Float>(this.npzFile, 'rotation');
-    final featuresDcArr   = must_get_arr<Float>(this.npzFile, 'features_dc');
-    final featuresRestArr = must_get_arr<Float>(this.npzFile, 'features_rest');
+    final xyzArr          = must_get_arr(this.npzFile, "xyz");
+    final opacityArr      = must_get_arr(this.npzFile, "opacity");
+    final scalingArr      = must_get_arr(this.npzFile, "scaling");
+    final rotationArr     = must_get_arr(this.npzFile, "rotation");
+    final featuresDcArr   = must_get_arr(this.npzFile, "features_dc");
+    final featuresRestArr = must_get_arr(this.npzFile, "features_rest");
 
     // SH cardinalities
     final sh_deg = this.sh_deg;
-    final num_sh_coeffs    = Utils.shNumCoefficients(sh_deg);
+    final num_sh_coeffs    = shNumCoefficients(sh_deg);
     final sh_coeffs_length = (num_sh_coeffs * 3);
     final rest_num_coefs   = (sh_coeffs_length - 3);
 
     // validate shapes (loosely)
-    expectShape(xyzArr,     2, [null, 3],              'xyz(S,3)');
-    expectShapeOneOf(opacityArr, [{ dims:1, pattern:[null] }, { dims:2, pattern:[null,1] }], 'opacity(S or Sx1)');
-    expectShape(scalingArr, 2, [null, 3],              'scaling(G,3)');
-    expectShape(rotationArr,2, [null, 4],              'rotation(G,4)');
+    expectShape(xyzArr,     2, [null, 3],              "xyz(S,3)");
+    expectShapeOneOf(opacityArr, [{ dims:1, pattern:[null] }, { dims:2, pattern:[null,1] }], "opacity(S or Sx1)");
+    expectShape(scalingArr, 2, [null, 3],              "scaling(G,3)");
+    expectShape(rotationArr,2, [null, 4],              "rotation(G,4)");
     expectShapeOneOf(featuresDcArr, [
       { dims:2, pattern:[null,3] },
       { dims:3, pattern:[null,1,3] },
       { dims:3, pattern:[null,3,1] }
-    ], 'features_dc(F,3)');
+    ], "features_dc(F,3)");
 
-    final restPerChan = (rest_num_coefs % 3 == 0) ? Std.int(rest_num_coefs / 3) : null;
+    final restPerChan:Null<Int> = (rest_num_coefs % 3 == 0) ? Std.int(rest_num_coefs / 3) : null;
     final restChoices:Array<ShapePattern> = [
       { dims:2, pattern:[null, rest_num_coefs] },
       { dims:3, pattern:[null, 1, rest_num_coefs] },
@@ -263,7 +293,7 @@ class NpzReader implements PointCloudReader {
       restChoices.push({ dims:3, pattern:[null, restPerChan, 3] });
       restChoices.push({ dims:3, pattern:[null, 3, restPerChan] });
     }
-    expectShapeOneOf(featuresRestArr, restChoices, 'features_rest(F,rest)');
+    expectShapeOneOf(featuresRestArr, restChoices, "features_rest(F,rest)");
 
     // cardinalities
     final S = Std.int(Math.min(xyzArr.shape[0], opacityArr.shape[0]));
@@ -280,29 +310,29 @@ class NpzReader implements PointCloudReader {
 
     // optional arrays
     var scaling_factorI8:Null<js.lib.Int8Array> = null;
-    var scaling_factor_zero_point = 0;
+    var scaling_factor_zero_point = 0.0;
     var scaling_factor_scale = 1.0;
     final hasScalingFactor = (this.npzFile.byName("scaling_factor_scale") != null);
     if (hasScalingFactor) {
-      scaling_factor_scale      = get_npz_value<Float>(this.npzFile, 'scaling_factor_scale')     ?? 1.0;
-      scaling_factor_zero_point = get_npz_value<Float>(this.npzFile, 'scaling_factor_zero_point') ?? 0;
-      final sfArr = must_get_arr<Float>(this.npzFile, 'scaling_factor');
-      expectShapeOneOf(sfArr, [{dims:1, pattern:[null]}, {dims:2, pattern:[null,1]}], 'scaling_factor(S)');
+      scaling_factor_scale      = nz(get_npz_value(this.npzFile, "scaling_factor_scale"),      1.0);
+      scaling_factor_zero_point = nz(get_npz_value(this.npzFile, "scaling_factor_zero_point"), 0.0);
+      final sfArr = must_get_arr(this.npzFile, "scaling_factor");
+      expectShapeOneOf(sfArr, [{dims:1, pattern:[null]}, {dims:2, pattern:[null,1]}], "scaling_factor(S)");
       scaling_factorI8 = (cast sfArr.data:js.lib.Int8Array).subarray(0, S);
     }
 
     var feature_indicesU32:Null<js.lib.Uint32Array> = null;
     if (this.npzFile.byName("feature_indices") != null) {
-      final fiArr = must_get_arr<Float>(this.npzFile, 'feature_indices');
-      expectShapeOneOf(fiArr, [{dims:1, pattern:[null]}, {dims:2, pattern:[null,1]}], 'feature_indices(S)');
+      final fiArr = must_get_arr(this.npzFile, "feature_indices");
+      expectShapeOneOf(fiArr, [{dims:1, pattern:[null]}, {dims:2, pattern:[null,1]}], "feature_indices(S)");
       final base:js.lib.Int32Array = cast fiArr.data;
       feature_indicesU32 = new js.lib.Uint32Array(base.buffer, base.byteOffset, Std.int(Math.min(S, base.length)));
     }
 
     var gaussian_indicesU32:Null<js.lib.Uint32Array> = null;
     if (this.npzFile.byName("gaussian_indices") != null) {
-      final giArr = must_get_arr<Float>(this.npzFile, 'gaussian_indices');
-      expectShapeOneOf(giArr, [{dims:1, pattern:[null]}, {dims:2, pattern:[null,1]}], 'gaussian_indices(S)');
+      final giArr = must_get_arr(this.npzFile, "gaussian_indices");
+      expectShapeOneOf(giArr, [{dims:1, pattern:[null]}, {dims:2, pattern:[null,1]}], "gaussian_indices(S)");
       final base:js.lib.Int32Array = cast giArr.data;
       gaussian_indicesU32 = new js.lib.Uint32Array(base.buffer, base.byteOffset, Std.int(Math.min(S, base.length)));
     }
@@ -312,10 +342,19 @@ class NpzReader implements PointCloudReader {
     gaussians.resize(S);
     for (i in 0...S) {
       final ix = i * 3;
-      final gi = gaussian_indicesU32 != null ? (gaussian_indicesU32[i] % Math.max(1, G)) : (i % Math.max(1, G));
-      final fi = feature_indicesU32  != null ? (feature_indicesU32[i]  % Math.max(1, F)) : (i % Math.max(1, F));
+      // Coerce typed-array reads to Int BEFORE modulo
+      var giVal = (gaussian_indicesU32 != null) ? Std.int(gaussian_indicesU32[i]) : i;
+      var fiVal = (feature_indicesU32  != null) ? Std.int(feature_indicesU32[i])  : i;
+
+      final gi:Int = Math.round(giVal % Math.max(1, G));
+      final fi:Int = Math.round(fiVal % Math.max(1, F));
+
       gaussians[i] = {
-        xyz: { x: xyzF32[ix + 0], y: xyzF32[ix + 1], z: xyzF32[ix + 2] },
+        xyz: { 
+          x: xyzF32[ix + 0], 
+          y: xyzF32[ix + 1], 
+          z: xyzF32[ix + 2]
+        },
         opacity: opacityI8[i],
         scale_factor: (scaling_factorI8 != null ? scaling_factorI8[i] : 0),
         geometry_idx: gi,
@@ -367,7 +406,7 @@ class NpzReader implements PointCloudReader {
       final qn = Math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz);
       if (qn > 0) { qw /= qn; qx /= qn; qy /= qn; qz /= qn; }
 
-      Utils.buildCovScalar(qx, qy, qz, qw, sx, sy, sz, cov6);
+      buildCovScalar(qx, qy, qz, qw, sx, sy, sz, cov6);
 
       final o = i * 6;
       covarsHalf[o + 0] = f32_to_f16_fast(cov6[0]);
@@ -384,9 +423,11 @@ class NpzReader implements PointCloudReader {
     writeQuant(dv,  0, features_dc_zero_point,    features_dc_scale);
     writeQuant(dv, 16, features_rest_zero_point,  features_rest_scale);
     writeQuant(dv, 32, opacity_zero_point,        opacity_scale);
-    writeQuant(dv, 48, Std.int(0),                1.0); // default scaling_factor_* if absent
+    writeQuant(dv, 48, 0,                         1.0); // default scaling_factor_* if absent
     if (hasScalingFactor) {
-      writeQuant(dv, 48, get_npz_value<Float>(this.npzFile, 'scaling_factor_zero_point') ?? 0, get_npz_value<Float>(this.npzFile, 'scaling_factor_scale') ?? 1.0);
+      final sf_zp = nz(get_npz_value(this.npzFile, "scaling_factor_zero_point"), 0.0);
+      final sf_sc = nz(get_npz_value(this.npzFile, "scaling_factor_scale"),      1.0);
+      writeQuant(dv, 48, sf_zp, sf_sc);
     }
     final quantBytes = new js.lib.Uint8Array(qbuf);
 
@@ -413,8 +454,8 @@ private inline function writeQuant(dv:js.lib.DataView, off:Int, zero:Float, scal
   dv.setUint32(off + 12, 0, true);
 }
 
-private function must_get_arr<T>(reader:INpzArchive, field_name:String):INpzArray<T> {
-  final arr = reader.byName<T>(field_name);
+private function must_get_arr(reader:INpzArchive, field_name:String):INpzArray<Float> {
+  final arr = reader.byName(field_name);
   if (arr == null) throw 'array ${field_name} missing';
   return arr;
 }
@@ -446,19 +487,18 @@ private function expectShapeOneOf(arr:INpzArray<Dynamic>, choices:Array<ShapePat
   }
 }
 
-private function get_npz_array_optional<T>(reader:INpzArchive, field_name:String):Null<Array<T>> {
-  final arr = reader.byName<T>(field_name);
+private function get_npz_array_optional(reader:INpzArchive, field_name:String):Null<Array<Float>> {
+  final arr:Null<INpzArray<Float>> = reader.byName(field_name);
   if (arr == null) return null;
   // Convert ArrayLike -> Array (copy) for simple access
-  final out = [];
+  var out:Array<Float> = [];
   final len:Int = js.Syntax.code("{0}.length", arr.data);
-  for (i in 0...len) out.push( js.Syntax.code("{0}[{1}]", arr.data, i) );
+  for (i in 0...len) out.push(js.Syntax.code("{0}[{1}]", arr.data, i));
   return out;
 }
 
-private function get_npz_value<T>(reader:INpzArchive, field_name:String):Null<T> {
-  final arr = get_npz_array_optional<T>(reader, field_name);
-  if (arr == null) return null;
-  if (arr.length == 0) throw "array empty";
+private function get_npz_value(reader:INpzArchive, field_name:String):Null<Float> {
+  final arr = get_npz_array_optional(reader, field_name);
+  if (arr == null || arr.length == 0) return null;
   return arr[0];
 }

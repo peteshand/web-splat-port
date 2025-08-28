@@ -1,11 +1,13 @@
 package io;
 
-// io/ply.ts → Haxe port
+// io/ply.ts → Haxe port (1:1 with provided TS)
 
 import pointcloud.Aabb;
 import pointcloud.Types;
-import Utils; // expects: buildCovScalar, shDegFromNumCoefs, sigmoid
 import io.Mod.GenericGaussianPointCloud;
+
+import js.html.TextEncoder;
+import js.html.TextDecoder;
 
 typedef PlyEncoding = String; // 'ascii' | 'binary_little_endian' | 'binary_big_endian'
 
@@ -36,8 +38,8 @@ class PlyReader {
     // infer sh degree from count of f_* props
     var numShCoefs = 0;
     for (n in this.header.vertexPropNames) if (StringTools.startsWith(n, "f_")) numShCoefs++;
-    final deg = Utils.shDegFromNumCoefs(Std.int(numShCoefs / 3));
-    if (deg == null) throw "PLY: number of SH coefs cannot be mapped to sh degree";
+    final deg = utils.Utils.shDegFromNumCoefs(Std.int(numShCoefs / 3));
+    if (deg == null) throw "number of sh coefficients " + numShCoefs + " cannot be mapped to sh degree";
     this.sh_deg = deg;
 
     // clamp debugging (kept off)
@@ -45,8 +47,8 @@ class PlyReader {
     this.num_points = fileCount;
 
     // parse comments
-    this.mip_splatting  = parseBoolFromComments(this.header.comments, "mip");
-    this.kernel_size    = parseNumberFromComments(this.header.comments, "kernel_size");
+    this.mip_splatting    = parseBoolFromComments(this.header.comments, "mip");
+    this.kernel_size      = parseNumberFromComments(this.header.comments, "kernel_size");
     this.background_color = parseRGBFromComments(this.header.comments, "background_color");
   }
 
@@ -106,9 +108,6 @@ class PlyReader {
 
     final cov6 = new js.lib.Float32Array(6);
 
-    // per-vertex floats layout (doc only)
-    // const floatsPerVertex = 3 + 3 + 3 + restCount + 1 + 3 + 4;
-
     var idx = 0;
     for (p in 0...n) {
       // pos
@@ -150,7 +149,7 @@ class PlyReader {
       }
 
       // opacity (sigmoid)
-      final opacity = Utils.sigmoid(f32[idx++]);
+      final opacity = utils.Utils.sigmoid(f32[idx++]);
 
       // scales exp
       final s1 = Math.exp(f32[idx++]);
@@ -162,7 +161,7 @@ class PlyReader {
       final qn = Math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz);
       if (qn > 0) { qw /= qn; qx /= qn; qy /= qn; qz /= qn; }
 
-      Utils.buildCovScalar(qx, qy, qz, qw, s1, s2, s3, cov6);
+      utils.Utils.buildCovScalar(qx, qy, qz, qw, s1, s2, s3, cov6);
 
       // pack gaussian halfs
       final gb = p * 10;
@@ -244,22 +243,38 @@ class PlyReader {
   static function parsePlyHeader(data:js.lib.ArrayBuffer):ParsedHeader {
     final u8 = new js.lib.Uint8Array(data);
     final needle = utf8Bytes("end_header");
+
+    // Find "end_header"
     var endIdx = -1;
-    outer: for (i in 0... (u8.length - needle.length + 1)) {
-      for (j in 0...needle.length) {
-        if (u8[i + j] != needle[j]) continue outer;
+    var limit = u8.length - needle.length + 1;
+    var i = 0;
+    while (i < limit) {
+      var matched = true;
+      var j = 0;
+      while (j < needle.length) {
+        if (u8[i + j] != needle[j]) { matched = false; break; }
+        j++;
       }
-      endIdx = i + needle.length;
-      break;
+      if (matched) { endIdx = i + needle.length; break; }
+      i++;
     }
     if (endIdx < 0) throw "PLY: end_header not found";
 
+    // advance to end of that line
     var headerEnd = endIdx;
     while (headerEnd < u8.length && u8[headerEnd] != 0x0a) headerEnd++;
     headerEnd++;
 
     final headerText = asciiDecode(u8.subarray(0, headerEnd));
-    final lines = headerText.split(~/\r?\n/).map(s -> StringTools.trim(s)).filter(function(s) return s.length > 0);
+
+    // Split lines (correct regex; not double-escaped)
+    var reNL = ~/\r?\n/;
+    var rawLines = reNL.split(headerText);
+    var lines = new Array<String>();
+    for (line in rawLines) {
+      var s = StringTools.trim(line);
+      if (s.length > 0) lines.push(s);
+    }
 
     var encoding:Null<PlyEncoding> = null;
     var vertexCount = 0;
@@ -267,6 +282,7 @@ class PlyReader {
     var vertexPropNames:Array<String> = [];
     var inVertexElement = false;
 
+    var reWS = ~/\s+/;
     for (line in lines) {
       if (StringTools.startsWith(line, "comment ")) {
         comments.push(line.substr("comment ".length));
@@ -280,14 +296,14 @@ class PlyReader {
         continue;
       }
       if (StringTools.startsWith(line, "element ")) {
-        final parts = line.split(~/\s+/);
+        final parts = reWS.split(line);
         final elemName = parts[1];
         inVertexElement = (elemName == "vertex");
         if (inVertexElement) vertexCount = Std.parseInt(parts[2]);
         continue;
       }
       if (StringTools.startsWith(line, "property ") && inVertexElement) {
-        final parts = line.split(~/\s+/);
+        final parts = reWS.split(line);
         final name = parts[parts.length - 1];
         vertexPropNames.push(name);
         continue;
@@ -306,10 +322,10 @@ class PlyReader {
   }
 
   static inline function utf8Bytes(s:String):js.lib.Uint8Array {
-    return new js.lib.TextEncoder().encode(s);
+    return new TextEncoder().encode(s);
   }
   static inline function asciiDecode(bytes:js.lib.Uint8Array):String {
-    return new js.lib.TextDecoder("utf-8").decode(bytes);
+    return new TextDecoder("utf-8").decode(bytes);
   }
 
   /* ------------------------- f32 -> f16 (scratch) ------------------------- */
@@ -318,7 +334,7 @@ class PlyReader {
   static var __f32v = new js.lib.Float32Array(__f32_buf);
   static var __u32v = new js.lib.Uint32Array(__f32_buf);
 
-  static inline function f32_to_f16_fast(val:Float):Int {
+  static function f32_to_f16_fast(val:Float):Int {
     __f32v[0] = val;
     final x = __u32v[0];
 
@@ -386,9 +402,8 @@ class PlyReader {
         if (idx >= 0) {
           final raw = StringTools.trim(c.substr(idx + 1));
           final parts = raw.split(",").map(s -> Std.parseFloat(StringTools.trim(s)));
-          if (parts.length == 3 && parts.every(v -> Math.isFinite(v))) {
-            return [parts[0], parts[1], parts[2]];
-          }
+          final ok = (parts.length == 3) && Math.isFinite(parts[0]) && Math.isFinite(parts[1]) && Math.isFinite(parts[2]);
+          if (ok) return [parts[0], parts[1], parts[2]];
         }
       }
     }
