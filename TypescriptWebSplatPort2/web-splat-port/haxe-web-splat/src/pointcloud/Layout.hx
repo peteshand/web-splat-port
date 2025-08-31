@@ -13,7 +13,7 @@ class Layout {
     var cached = LAYOUTS.get(device);
     if (cached != null) return cached;
 
-    // plain
+    // plain (preprocess)
     var plain = device.createBindGroupLayout({
       label: 'pc.layout.plain',
       entries: [
@@ -23,7 +23,7 @@ class Layout {
       ]
     });
 
-    // compressed
+    // compressed (preprocess)
     var compressed = device.createBindGroupLayout({
       label: 'pc.layout.compressed',
       entries: [
@@ -35,11 +35,12 @@ class Layout {
       ]
     });
 
-    // render
+    // render (must be visible to VERTEX, because vs_main uses @group(0)@binding(2))
     var render = device.createBindGroupLayout({
       label: 'pc.layout.render',
       entries: [
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } }
+        // NOTE: mirror TS: VERTEX | COMPUTE (compute is harmless; VERTEX is required)
+        { binding: 2, visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }
       ]
     });
 

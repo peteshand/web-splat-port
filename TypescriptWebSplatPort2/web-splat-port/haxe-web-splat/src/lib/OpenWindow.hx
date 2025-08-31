@@ -1,6 +1,20 @@
 package lib;
 
-// Minimal extern for ResizeObserver (available on Window in modern browsers)
+import js.Browser;
+import js.html.CanvasElement;
+import js.html.Element;
+import js.html.Document;
+
+import haxe.io.Bytes;
+import haxe.io.BytesInput;
+
+import lib.WindowContext;
+import scene.Scene;
+
+// 🔽 NEW: import the input binder
+import lib.EguiWGPU.Internal;
+
+// Minimal extern for ResizeObserver
 @:native("ResizeObserver")
 extern class ResizeObserver {
   public function new(cb:Dynamic->Void):Void;
@@ -8,159 +22,120 @@ extern class ResizeObserver {
 }
 
 class OpenWindow {
-  /** 1:1 with TS: open_window(file, scene, config, pointcloud_file_path, scene_file_path) */
-  public static function open_window(file:ArrayBuffer, scene:Null<ArrayBuffer>, config:RenderConfig, pointcloud_file_path:Null<String>, scene_file_path:Null<String>):Promise<Dynamic> {
+  /** open_window(file, scene, config, pointcloud_file_path, scene_file_path) */
+  public static function open_window(
+    file:ArrayBuffer,
+    sceneBuf:Null<ArrayBuffer>,
+    config:RenderConfig,
+    pointcloud_file_path:Null<String>,
+    scene_file_path:Null<String>
+  ):Promise<Dynamic> {
     return new js.lib.Promise(function (resolve, reject) {
-      // Canvas: find-or-create
       var canvas:CanvasElement = cast document.getElementById('window-canvas');
       if (canvas == null) {
-        canvas = document.createCanvasElement();
+        canvas = Browser.document.createCanvasElement();
         canvas.id = 'window-canvas';
         canvas.style.width = '100%';
         canvas.style.height = '100%';
         document.body.appendChild(canvas);
       }
 
-      // Real backing store = CSS * DPR
+      // backing size from CSS * DPR
       var backingFromCss = function() {
         var rect = canvas.getBoundingClientRect();
-        var dpr:Float = (untyped window.devicePixelRatio) != null ? (untyped window.devicePixelRatio) : 1.0;
+        var dpr:Float = (untyped Browser.window.devicePixelRatio) != null ? (untyped Browser.window.devicePixelRatio) : 1.0;
         var w = Math.round(rect.width * dpr);
         var h = Math.round(rect.height * dpr);
         return { w: w, h: h, dpr: dpr };
       };
 
-      // Phase 1: initialize at 800x600 like Rust
-      var initW = 800;
-      var initH = 600;
-      canvas.width  = initW;
-      canvas.height = initH;
+      // init size 800x600 (like Rust)
+      canvas.width  = 800;
+      canvas.height = 600;
 
-      // WindowContext factory (promise)
-      var stateP:Promise<Dynamic>;
-      try {
-        // Direct call avoids Reflect + DCE issues (prefix with `lib.` if not in the same package)
-        stateP = cast WindowContext.create(canvas, file, config);
-      } catch (e:Dynamic) {
-        reject(e);
-        return;
-      }
+      // create WindowContext
+      WindowContext.create(canvas, file, config).then(function(state) {
+        // 🔽 NEW: bind DOM input to the camera controller (1:1 with TS open_window.ts)
+        final unbindInput = Internal.bind_input(canvas, state.controller);
 
-      stateP.then(function(state:Dynamic) {
-        // Bind input
-        try {
-          var internalNs:Dynamic = Reflect.field(Internal, "Internal");
-          if (internalNs != null && Reflect.hasField(internalNs, "bind_input")) {
-            Reflect.callMethod(internalNs, Reflect.field(internalNs, "bind_input"), [canvas, Reflect.field(state, "controller")]);
-          }
-        } catch (_:Dynamic) {}
+        // store paths (typed)
+        state.pointcloud_file_path = pointcloud_file_path;
+        state.scene_file_path = scene_file_path;
 
         // Phase 2: resize to real backing store
         var applyRealSize = function() {
           var now = backingFromCss();
           if (canvas.width != now.w)  canvas.width  = now.w;
           if (canvas.height != now.h) canvas.height = now.h;
-          var resize = Reflect.field(state, "resize");
-          if (resize != null) Reflect.callMethod(state, resize, [ { width: now.w, height: now.h }, now.dpr ]);
+          state.resize({ width: now.w, height: now.h }, now.dpr);
         };
         applyRealSize();
 
-        // Observers / listeners
+        // Observe/responsive
         try {
           var ro = new ResizeObserver(function(_){ applyRealSize(); });
           ro.observe(canvas);
         } catch (_:Dynamic) {}
+        Browser.window.addEventListener('resize', function(_){ applyRealSize(); });
+        Browser.window.addEventListener('orientationchange', function(_){ applyRealSize(); });
 
-        try {
-          window.addEventListener('resize', function(_){ applyRealSize(); });
-        } catch (_:Dynamic) {}
-
-        try {
-          window.addEventListener('orientationchange', function(_){ applyRealSize(); });
-        } catch (_:Dynamic) {}
-
-        // File path fields (expanded try/catch)
-        try {
-          Reflect.setField(state, "pointcloud_file_path", pointcloud_file_path);
-        } catch (_:Dynamic) {}
-
-        // Optional: load scene json if provided
-        if (scene != null) {
+        // Optional scene JSON
+        if (sceneBuf != null) {
           try {
-            var sceneClass = Type.resolveClass("scene.Scene");
-            if (sceneClass != null) {
-              var fromJson = Reflect.field(sceneClass, "fromJson");
-              if (fromJson != null) {
-                var s = Reflect.callMethod(sceneClass, fromJson, [scene]);
-                var set_scene = Reflect.field(state, "set_scene");
-                if (set_scene != null) Reflect.callMethod(state, set_scene, [s]);
-
-                var set_cam = Reflect.field(state, "set_scene_camera");
-                if (set_cam != null) Reflect.callMethod(state, set_cam, [0]);
-
-                Reflect.setField(state, "scene_file_path", scene_file_path);
-              }
-            }
+            var td = new TextDecoder("utf-8");
+            var jsonText = td.decode(new js.lib.Uint8Array(sceneBuf));
+            var json:Dynamic = haxe.Json.parse(jsonText);
+            var sc = Scene.fromJson(cast json);
+            state.set_scene(sc);
+            state.set_scene_camera(0);
           } catch (err:Dynamic) {
             console.error('cannot load scene:', err);
           }
         }
 
-        // Optional: set skybox
-        try {
-          var skybox = Reflect.field(config, "skybox");
-          if (skybox != null) {
-            var set_env = Reflect.field(state, "set_env_map");
-            if (set_env != null) Reflect.callMethod(state, set_env, [skybox]);
-          }
-        } catch (e:Dynamic) {
-          console.error('failed to set skybox:', e);
+        // Optional env map (if config.skybox exists)
+        if (config.skybox != null) {
+          state.set_env_map(config.skybox);
         }
 
         // Main loop
-        var last = window.performance.now();
+        var last = Browser.window.performance.now();
         function loop(_:Float):Void {
-          var now = window.performance.now();
+          var now = Browser.window.performance.now();
           var dt = (now - last) / 1000.0;
           last = now;
 
-          var upd = Reflect.field(state, "update");
-          if (upd != null) Reflect.callMethod(state, upd, [dt]);
+          state.update(dt);
 
           var shapes:Dynamic = null;
           var request_redraw:Bool = false;
-          var uiFn = Reflect.field(state, "ui");
-          if (uiFn != null) {
-            var uiRes:Dynamic = Reflect.callMethod(state, uiFn, []);
-            if (uiRes != null && Std.isOfType(uiRes, Array)) {
-              var arr:Array<Dynamic> = cast uiRes;
-              if (arr.length >= 2) {
-                request_redraw = arr[0] == true;
-                shapes = arr[1];
-              }
-            }
-          }
-          if (Reflect.field(state, "_changed") == true) request_redraw = true;
 
-          var render = Reflect.field(state, "render");
-          if (render != null) {
-            var ui_visible = Reflect.field(state, "ui_visible") == true;
-            Reflect.callMethod(state, render, [request_redraw, ui_visible ? shapes : null]);
+          // UI
+          var uiRes = state.ui();
+          if (uiRes != null && uiRes.length >= 2) {
+            request_redraw = uiRes[0] == true;
+            shapes = uiRes[1];
           }
+          if (state.needsRedraw()) request_redraw = true;
 
-          window.requestAnimationFrame(loop);
+          state.render(request_redraw, state.ui_visible ? shapes : null);
+
+          Browser.window.requestAnimationFrame(loop);
         }
-        window.requestAnimationFrame(loop);
+        Browser.window.requestAnimationFrame(loop);
 
         resolve(null);
-      }).catchError(function(e) {
-        reject(e);
-      });
+      }).catchError(reject);
     });
   }
 
-  /** 1:1 TS wrapper */
-  public static function run_wasm(pc:ArrayBuffer, scene:Null<ArrayBuffer>, pc_file:Null<String>, scene_file:Null<String>):Promise<Dynamic> {
+  /** Convenience wrapper */
+  public static function run_wasm(
+    pc:ArrayBuffer,
+    scene:Null<ArrayBuffer>,
+    pc_file:Null<String>,
+    scene_file:Null<String>
+  ):Promise<Dynamic> {
     return open_window(pc, scene, new RenderConfig(false, null, false), pc_file, scene_file);
   }
 }

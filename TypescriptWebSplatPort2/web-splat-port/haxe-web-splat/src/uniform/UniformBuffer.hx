@@ -3,42 +3,6 @@ package uniform;
 import js.lib.ArrayBufferView;
 import js.lib.Uint8Array;
 
-/** Minimal externs assumed to exist in your project/tooling. */
-/*extern class GPUBuffer {
-  public var size(default,null):Int;
-  public function getMappedRange(?offset:Int, ?size:Int):js.lib.ArrayBuffer;
-  public function unmap():Void;
-}*/
-//extern class GPUBindGroup {}
-// extern class GPUBindGroupLayout {}
-/*extern class GPUQueue {
-  public function writeBuffer(
-    buffer:GPUBuffer, offset:Int, data:js.lib.ArrayBuffer, dataOffset:Int, size:Int
-  ):Void;
-}*/
-/*extern class GPUDevice {
-  public function createBuffer(o:Dynamic):GPUBuffer;
-  public function createBindGroup(o:Dynamic):GPUBindGroup;
-  public function createBindGroupLayout(o:Dynamic):GPUBindGroupLayout;
-  public function createCommandEncoder(o:Dynamic):GPUCommandEncoder;
-}*/
-/*extern class GPUCommandEncoder {
-  public function copyBufferToBuffer(src:GPUBuffer, srcOffset:Int, dst:GPUBuffer, dstOffset:Int, size:Int):Void;
-  public function finish():Dynamic;
-}*/
-/*extern class GPUShaderStage {
-  public static var VERTEX:Int;
-  public static var FRAGMENT:Int;
-  public static var COMPUTE:Int;
-}
-extern class GPUBufferUsage {
-  public static var UNIFORM:Int;
-  public static var COPY_DST:Int;
-}
-extern class GPUMapMode {
-  public static var READ:Int;
-}*/
-
 /** Simple logger gate shared across modules. */
 private inline function loggingEnabled():Bool {
   return camera.Internal.loggingEnabled();

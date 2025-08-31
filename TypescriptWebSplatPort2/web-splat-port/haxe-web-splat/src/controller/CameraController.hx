@@ -47,7 +47,7 @@ class CameraController {
   public var left_mouse_pressed:Bool;
   public var right_mouse_pressed:Bool;
   public var alt_pressed:Bool;
-  public var user_inptut:Bool; // keep original typo for 1:1 API
+  public var user_input:Bool;
 
   public function new(speed:Float, sensitivity:Float) {
     this.center = Vec3.fromValues(0, 0, 0);
@@ -64,7 +64,7 @@ class CameraController {
     this.left_mouse_pressed = false;
     this.right_mouse_pressed = false;
     this.alt_pressed = false;
-    this.user_inptut = false;
+    this.user_input = false;
   }
 
   /** Returns true if the key was handled (matches Rust’s bool). */
@@ -93,7 +93,7 @@ class CameraController {
         processed = false;
     }
 
-    this.user_inptut = processed;
+    this.user_input = processed;
     if (processed) dlog('process_keyboard', { key:key, pressed:pressed, amount:this.amount, rotation:this.rotation });
     return processed;
   }
@@ -103,20 +103,20 @@ class CameraController {
     if (this.left_mouse_pressed) {
       this.rotation[0] += mouse_dx;
       this.rotation[1] += mouse_dy;
-      this.user_inptut = true;
+      this.user_input = true;
       dlog('process_mouse rotate', { dx:mouse_dx, dy:mouse_dy, rotation:this.rotation });
     }
     if (this.right_mouse_pressed) {
       this.shift[1] += -mouse_dx;
       this.shift[0] += mouse_dy;
-      this.user_inptut = true;
+      this.user_input = true;
       dlog('process_mouse pan', { dx:mouse_dx, dy:mouse_dy, shift:this.shift });
     }
   }
 
   public function process_scroll(dy:Float):Void {
     this.scroll += -dy;
-    this.user_inptut = true;
+    this.user_input = true;
     dlog('process_scroll', { dy:dy, scroll:this.scroll });
   }
 
@@ -208,7 +208,7 @@ class CameraController {
     this.scroll *= decay;
     if (Math.abs(this.scroll) < 1e-4) this.scroll = 0.0;
 
-    this.user_inptut = false;
+    this.user_input = false;
     dlog('update_camera (orbit, no-roll)', { dt:dt, yaw:yaw, pitch:pitch, center:this.center, camPos:camera.position });
   }
 }

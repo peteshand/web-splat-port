@@ -18,51 +18,54 @@ import camera.PerspectiveProjection;
 
 import io.Mod.GenericGaussianPointCloud;
 
+import pointcloud.PointCloud;
+import controller.CameraController;
+
 import scene.Scene;
 import scene.SceneCamera;
 import scene.Split;
 
 import utils.GPUStopwatch;
 
+import js.Browser;
 import js.html.CanvasElement;
 
 class WindowContext {
   // --- GPU / surface ---
-  private var wgpu_context:WGPUContext;
-  private var surface:GPUCanvasContext;
-  private var config:SurfaceConfiguration;
-  private var window:CanvasElement;
-  private var scale_factor:Float;
+  public var wgpu_context:WGPUContext; // made public to inspect if needed
+  var surface:GPUCanvasContext;
+  var config:SurfaceConfiguration;
+  var window:CanvasElement;
+  var scale_factor:Float;
 
   // --- app state ---
-  private var pc:PointCloud;
-  private var pointcloud_file_path:Null<String> = null;
-  private var renderer:GaussianRenderer;
-  private var animation:Null<Array<Dynamic>> = null; // [Animation<PerspectiveCamera>, Bool]
-  private var controller:CameraController;
-  private var scene:Null<Scene> = null;
-  private var scene_file_path:Null<String> = null;
-  private var current_view:Null<Int> = null;
-  private var ui_renderer:EguiWGPU;
-  private var fps:Float = 0;
-  private var ui_visible:Bool = true;
+  public var pc:PointCloud; // public for renderer/diagnostics
+  public var pointcloud_file_path:Null<String> = null; // was private
+  var renderer:GaussianRenderer;
+  var animation:Null<Array<Dynamic>> = null; // [Animation<PerspectiveCamera>, Bool]
+  public var controller:CameraController;     // public so input binder can hook up
+  var scene:Null<Scene> = null;
+  public var scene_file_path:Null<String> = null; // was private
+  var current_view:Null<Int> = null;
+  var ui_renderer:EguiWGPU;
+  var fps:Float = 0;
+  public var ui_visible:Bool = true; // used by caller
 
-  private var display:Display;
-  private var splatting_args:SplattingArgs;
-  private var saved_cameras:Array<SceneCamera> = [];
-  private var stopwatch:Null<GPUStopwatch> = null;
+  var display:Display;
+  var splatting_args:SplattingArgs;
+  var saved_cameras:Array<SceneCamera> = [];
+  var stopwatch:Null<GPUStopwatch> = null;
 
   // --------- PERF tracking -------
-  private var _lastCamPos:Vec3 = Vec3.create();
-  private var _lastCamRot:Quat = Quat.create();
-  private var _lastWalltime:Float = 0;
-  private var _changed:Bool = true;
+  var _lastCamPos:Vec3 = Vec3.create();
+  var _lastCamRot:Quat = Quat.create();
+  var _lastWalltime:Float = 0;
+  var _changed:Bool = true;
   // --------------------------------
 
-  private function new() {}
+  function new() {}
 
-  /** TS: static async new(window, pc_file, render_config) -> Promise<WindowContext>
-      Haxe: named static factory to avoid ctor conflicts. */
+  /** prefer typed factory over reflection */
   public static function create(
     window:CanvasElement,
     pc_file:js.lib.ArrayBuffer,
@@ -71,7 +74,7 @@ class WindowContext {
     return new Promise(function(resolve, reject) {
       var state = new WindowContext();
 
-      // Canvas size (prefer backing store, fall back to CSS box)
+      // Canvas size
       var rect = window.getBoundingClientRect();
       var size = {
         width:  Std.int(Math.max(1, (window.width  != null && window.width  > 0) ? window.width  : Math.floor(rect.width))),
@@ -83,19 +86,18 @@ class WindowContext {
         ? window.ownerDocument.defaultView.devicePixelRatio : null;
       state.scale_factor = dpr != null ? dpr : 1;
 
-      // Canvas WebGPU context
+      // WebGPU canvas context
       var s = window.getContext('webgpu');
       if (s == null) { reject('WebGPU canvas context unavailable'); return; }
       state.surface = cast s;
 
-      // WebGPU context (device/queue)
+      // WebGPU device/queue
       WGPUContext.create(null, state.surface).then(function(wgpu_context) {
         state.wgpu_context = wgpu_context;
 
         var surface_format:GPUTextureFormat = untyped navigator.gpu.getPreferredCanvasFormat();
         var render_format:GPUTextureFormat = render_config.hdr ? 'rgba16float' : 'rgba8unorm';
 
-        // Configure surface: linear intermediate via viewFormats (match TS/Rust)
         state.surface.configure({
           device: wgpu_context.device,
           format: surface_format,
@@ -112,7 +114,7 @@ class WindowContext {
           view_formats: [deSRGB(surface_format)]
         };
 
-        // ---------- Load + build PointCloud (no reflection, no globals) ----------
+        // Load + build PointCloud
         var genericPc:GenericGaussianPointCloud;
         try {
           genericPc = GenericGaussianPointCloud.load(pc_file);
@@ -124,7 +126,6 @@ class WindowContext {
         PointCloud.create(wgpu_context.device, genericPc).then(function(pc) {
           state.pc = pc;
 
-          // Renderer
           GaussianRenderer.create(
             wgpu_context.device,
             wgpu_context.queue,
@@ -134,14 +135,14 @@ class WindowContext {
           ).then(function(renderer) {
             state.renderer = renderer;
 
-            // ---- Initial camera (Rust parity for FOVs) ----
+            // Initial camera
             var aabb = state.pc.bbox();
             var aspect:Float = size.width / Math.max(1, size.height);
 
             var c0v = aabb.center();
             var c0 = Vec3.fromValues(c0v.x, c0v.y, c0v.z);
             var r:Float = aabb.radius();
-            var eyeTuple = Vec3.fromValues(c0[0] - r * 0.5, c0[1] - r * 0.5, c0[2] - r * 0.5);
+            var eye = Vec3.fromValues(c0[0] - r * 0.5, c0[1] - r * 0.5, c0[2] - r * 0.5);
             var rot = Quat.create();
 
             var deg2rad = function(d:Float) return (d * Math.PI) / 180.0;
@@ -155,7 +156,7 @@ class WindowContext {
               1000
             );
 
-            var view_camera = new PerspectiveCamera(eyeTuple, rot, proj);
+            var view_camera = new PerspectiveCamera(eye, rot, proj);
 
             var controller = new CameraController(0.1, 0.05);
             var c = state.pc.center();
@@ -164,7 +165,6 @@ class WindowContext {
 
             state.ui_renderer = new EguiWGPU(wgpu_context.device, surface_format, window);
 
-            // Display (linear → sRGB)
             Display.create(
               wgpu_context.device,
               render_format,
@@ -255,8 +255,10 @@ class WindowContext {
     if (this.animation != null) {
       var next_camera:Animation<PerspectiveCamera> = cast this.animation[0];
       var playing:Bool = this.animation[1];
-      if ((cast this.controller:Dynamic).user_inptut == true) {
-        this.cancle_animation();
+      // Prefer a typed flag on controller. Make it public in CameraController if needed.
+      var userInput:Bool = try this.controller.user_input catch (_) false;
+      if (userInput) {
+        this.cancel_animation();
       } else {
         var adv = playing ? dt : 0.0;
         this.splatting_args.camera = next_camera.update(adv);
@@ -297,15 +299,7 @@ class WindowContext {
   public function render(redraw_scene:Bool, ?shapes:Dynamic):Void {
     if (this.stopwatch != null) this.stopwatch.reset();
 
-    // Prefer typed call if your extern has it; otherwise tiny fallback:
-    var texture:GPUTexture = null;
-    #if js
-    try texture = this.surface.getCurrentTexture() catch (_:Dynamic) {}
-    if (texture == null) {
-      var getTex:Dynamic = Reflect.field(this.surface, "getCurrentTexture");
-      if (getTex != null) texture = cast Reflect.callMethod(this.surface, getTex, []);
-    }
-    #end
+    var texture = getCurrentTextureSafe(this.surface);
     if (texture == null) return;
 
     var view_rgb  = texture.createView({ format: deSRGB(this.config.format) });
@@ -383,33 +377,19 @@ class WindowContext {
     this._changed = false;
   }
 
-  private function set_scene(scene:Scene):Void {
-    // Prefer typed call if your Scene exposes extend():Float; otherwise fall back.
-    var extend:Float;
-    #if js
-    try {
-      // @:ifFeature extend (will compile if method exists)
-      untyped __js__("if(scene.extend){{}}");
-      extend = untyped scene.extend();
-    } catch (_:Dynamic) {
-      extend = this.pc.bbox().radius();
-    }
-    #else
-    extend = this.pc.bbox().radius();
-    #end
+  // Public API used by the window bootstrapper
+  public function set_scene(scene:Scene):Void {
+    var extend:Float = scene.getExtend(); // typed accessor on your Scene.hx
     this.splatting_args.sceneExtend = extend;
 
-    var n = scene.numCameras();
+    // compute center from cameras
+    var cams = scene.getCameras();
+    var cnt = cams.length;
     var acc = { x: 0.0, y: 0.0, z: 0.0 };
-    var cnt = 0;
-    for (i in 0...n) {
-      var c = scene.camera(i);
-      if (c != null) {
-        acc.x += c.position[0];
-        acc.y += c.position[1];
-        acc.z += c.position[2];
-        cnt++;
-      }
+    for (c in cams) {
+      acc.x += c.position[0];
+      acc.y += c.position[1];
+      acc.z += c.position[2];
     }
     var center = (cnt > 0) ? { x: acc.x / cnt, y: acc.y / cnt, z: acc.z / cnt } : this.pc.center();
     this.controller.center = Vec3.fromValues(center.x, center.y, center.z);
@@ -417,8 +397,7 @@ class WindowContext {
     this.scene = scene;
     if (this.saved_cameras.length == 0) {
       var arr:Array<SceneCamera> = [];
-      for (i in 0...scene.numCameras()) {
-        var c = scene.camera(i);
+      for (c in scene.getCameras()) {
         if (c != null && (c.split == null || c.split == Split.Test)) arr.push(c);
       }
       this.saved_cameras = arr;
@@ -426,53 +405,49 @@ class WindowContext {
     this._changed = true;
   }
 
-  private function set_scene_camera(i:Int):Void {
+  public function set_scene_camera(i:Int):Void {
     if (this.scene == null) return;
     this.current_view = i;
     var cam:SceneCamera = this.scene.camera(i);
     if (cam == null) return;
 
-    // Build a PerspectiveCamera from SceneCamera fields (TS fallback parity)
     var pos = toVec3(cam.position);
     var rot = toQuat(cam.rotation);
 
-    // Reuse current projection (Rust also keeps projection except for resize)
     var proj = this.splatting_args.camera.projection;
     var pcam = new PerspectiveCamera(pos, rot, proj);
     this.update_camera(pcam);
   }
 
-  private function set_env_map(_path:String):Promise<Void> {
+  public function set_env_map(_path:String):Promise<Void> {
     this.splatting_args.showEnvMap = true;
     this._changed = true;
     return Promise.resolve(null);
   }
 
-  private function cancle_animation():Void {
+  public function cancel_animation():Void { // spelling fixed; keep alias below
     this.animation = null;
     this.controller.reset_to_camera(this.splatting_args.camera);
     this._changed = true;
   }
+  public inline function cancle_animation():Void cancel_animation(); // alias for legacy calls
 
-  private function stop_animation():Void {
+  public function stop_animation():Void {
     if (this.animation != null) this.animation[1] = false;
     this.controller.reset_to_camera(this.splatting_args.camera);
     this._changed = true;
   }
 
-  private function update_camera(camera:PerspectiveCamera):Void {
+  public function update_camera(camera:PerspectiveCamera):Void {
     this.splatting_args.camera = camera;
     this.splatting_args.camera.projection.resize(this.config.width, this.config.height);
     this._changed = true;
   }
 
-  private function save_view():Void {
+  public function save_view():Void {
     var sceneArr:Array<SceneCamera> = [];
     if (this.scene != null) {
-      for (i in 0...this.scene.numCameras()) {
-        var c = this.scene.camera(i);
-        if (c != null) sceneArr.push(c);
-      }
+      for (c in this.scene.getCameras()) sceneArr.push(c);
     }
     var max_scene_id = 0;
     for (c in sceneArr) if (c.id != null) max_scene_id = Std.int(Math.max(max_scene_id, c.id));
@@ -490,7 +465,9 @@ class WindowContext {
     this.saved_cameras.push(cam);
   }
 
-  // -------- helpers: typed conversion, no reflection --------
+  public inline function needsRedraw():Bool return _changed;
+
+  // -------- helpers --------
   static inline function toVec3(v:Dynamic):Vec3 {
     if (Std.isOfType(v, Array)) {
       var a:Array<Float> = cast v;
@@ -504,5 +481,11 @@ class WindowContext {
       return Quat.fromValues(a[0], a[1], a[2], a[3]);
     }
     return cast v;
+  }
+
+  static inline function getCurrentTextureSafe(ctx:GPUCanvasContext):Null<GPUTexture> {
+    var tex:GPUTexture = null;
+    try tex = ctx.getCurrentTexture() catch (_:Dynamic) {}
+    return tex;
   }
 }

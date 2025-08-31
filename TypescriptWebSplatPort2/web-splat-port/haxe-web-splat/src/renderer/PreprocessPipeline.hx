@@ -1,6 +1,7 @@
 package renderer;
 
-import renderer.Internal;
+import uniform.UniformBuffer;
+import pointcloud.PointCloud;
 
 class PreprocessPipeline {
   var pipeline:GPUComputePipeline;
@@ -9,45 +10,70 @@ class PreprocessPipeline {
   var sortPreLayout:GPUBindGroupLayout;
   var settingsLayout:GPUBindGroupLayout;
 
-  public function new(cameraLayout:GPUBindGroupLayout, pcLayout:GPUBindGroupLayout, sortPreLayout:GPUBindGroupLayout, settingsLayout:GPUBindGroupLayout) {
+  public function new(
+    cameraLayout:GPUBindGroupLayout,
+    pcLayout:GPUBindGroupLayout,
+    sortPreLayout:GPUBindGroupLayout,
+    settingsLayout:GPUBindGroupLayout
+  ) {
     this.cameraLayout = cameraLayout;
     this.pcLayout = pcLayout;
     this.sortPreLayout = sortPreLayout;
     this.settingsLayout = settingsLayout;
   }
 
-  public static function create(device:GPUDevice, shDeg:Int, compressed:Bool, sortPreLayout:GPUBindGroupLayout):Promise<PreprocessPipeline> {
-    var cameraLayout = UniformBuffer.bind_group_layout(device); // group(0)
-    var pcLayout = compressed ? pointcloud.PointCloud.bind_group_layout_compressed(device) : pointcloud.PointCloud.bind_group_layout(device); // group(1)
-    var settingsLayout = UniformBuffer.bind_group_layout(device); // group(3)
+  public static function create(
+    device:GPUDevice,
+    shDeg:Int,
+    compressed:Bool,
+    sortPreLayout:GPUBindGroupLayout
+  ):Promise<PreprocessPipeline> {
+    final cameraLayout = UniformBuffer.bind_group_layout(device); // group(0)
+    final pcLayout = compressed
+      ? PointCloud.bind_group_layout_compressed(device)           // group(1)
+      : PointCloud.bind_group_layout(device);
+    final settingsLayout = UniformBuffer.bind_group_layout(device); // group(3)
 
-    var self = new PreprocessPipeline(cameraLayout, pcLayout, sortPreLayout, settingsLayout);
+    final self = new PreprocessPipeline(cameraLayout, pcLayout, sortPreLayout, settingsLayout);
 
-    var wgslPath = compressed ? './shaders/preprocess_compressed.wgsl' : './shaders/preprocess.wgsl';
+    final wgslPath = compressed ? './shaders/preprocess_compressed.wgsl' : './shaders/preprocess.wgsl';
     return window.fetch(wgslPath)
-      .then(function(res) return res.text())
-      .then(function(src:String) {
-        var code = 'const MAX_SH_DEG = ' + shDeg + 'u;\n' + src;
-        var module = device.createShaderModule({ label: 'preprocess.module', code: code });
-        var pipelineLayout = device.createPipelineLayout({
+      .then(res -> res.text())
+      .then((src:String) -> {
+        // Match TS/Rust: declare MAX_SH_DEG with explicit u32 type
+        final code = 'const MAX_SH_DEG : u32 = ' + (shDeg >>> 0) + 'u;\n' + src;
+
+        final module = device.createShaderModule({ label: 'preprocess.module', code: code });
+
+        final pipelineLayout = device.createPipelineLayout({
           label: 'preprocess.layout',
-          bindGroupLayouts: [cameraLayout, pcLayout, sortPreLayout, settingsLayout]
+          bindGroupLayouts: [self.cameraLayout, self.pcLayout, self.sortPreLayout, self.settingsLayout]
         });
+
         self.pipeline = device.createComputePipeline({
           label: 'preprocess.pipeline',
           layout: pipelineLayout,
-          compute: { module: module, entryPoint: 'main' }
+          // Match TS entry point name: 'preprocess'
+          compute: { module: module, entryPoint: 'preprocess' }
         });
+
         renderer.Internal.logi('[preprocess::new]', 'sh_deg=' + shDeg + ', compressed=' + compressed);
         return self;
       });
   }
 
-  public function run(encoder:GPUCommandEncoder, pc:pointcloud.PointCloud, cameraBG:GPUBindGroup, sortPreBG:GPUBindGroup, settingsBG:GPUBindGroup) {
-    var numPoints = pc.numPoints();
-    var wgsX = Math.ceil(numPoints / 256); // workgroup size matches WGSL
+  public function run(
+    encoder:GPUCommandEncoder,
+    pc:pointcloud.PointCloud,
+    cameraBG:GPUBindGroup,
+    sortPreBG:GPUBindGroup,
+    settingsBG:GPUBindGroup
+  ):Void {
+    final numPoints = pc.numPoints();
+    final wgsX = Math.ceil(numPoints / 256); // workgroup size matches WGSL
     renderer.Internal.logi('[preprocess::run]', 'dispatch_x=' + wgsX + ', num_points=' + numPoints);
-    var pass = encoder.beginComputePass({ label: 'preprocess compute pass' });
+
+    final pass = encoder.beginComputePass({ label: 'preprocess compute pass' });
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, cameraBG);
     pass.setBindGroup(1, pc.getBindGroup());

@@ -135,7 +135,7 @@ class SceneCamera {
       }
     }
     Quat.normalize(q, q);
-  
+    
     final pos = Vec3.fromValues(this.position[0], this.position[1], this.position[2]);
     final proj = PerspectiveProjection.create(
       Vec2.fromValues(this.width, this.height),

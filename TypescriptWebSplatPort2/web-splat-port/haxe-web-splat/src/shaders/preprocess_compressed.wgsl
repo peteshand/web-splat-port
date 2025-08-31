@@ -28,8 +28,8 @@ struct CameraUniforms {
     proj: mat4x4<f32>,
     proj_inv: mat4x4<f32>,
     
-    viewport: Vec2<f32>,
-    focal: Vec2<f32>
+    viewport: vec2<f32>,
+    focal: vec2<f32>
 };
 
 struct Quantization {
@@ -93,8 +93,8 @@ struct SortInfos {
 }
 
 struct RenderSettings {
-    clipping_box_min: Vec4<f32>,
-    clipping_box_max: Vec4<f32>,
+    clipping_box_min: vec4<f32>,
+    clipping_box_max: vec4<f32>,
     gaussian_scaling: f32,
     max_sh_deg: u32,
     show_env_map: u32,
@@ -102,7 +102,7 @@ struct RenderSettings {
     kernel_size: f32,
     walltime: f32,
     scene_extend: f32,
-    center: Vec3<f32>,
+    center: vec3<f32>,
 }
 
 
@@ -139,13 +139,13 @@ fn dequantize(value: i32, quantization: Quantization) -> f32 {
     return (f32(value) - f32(quantization.zero_point)) * quantization.scaling;
 }
 
-fn dequantizef4(value: Vec4<f32>, quantization: Quantization) -> Vec4<f32> {
+fn dequantizef4(value: vec4<f32>, quantization: Quantization) -> vec4<f32> {
     return (value - f32(quantization.zero_point)) * quantization.scaling;
 }
 
 
 /// reads the ith sh coef from the vertex buffer
-fn sh_coef(splat_idx: u32, c_idx: u32) -> Vec3<f32> {
+fn sh_coef(splat_idx: u32, c_idx: u32) -> vec3<f32> {
     let n = (MAX_SH_DEG + 1u) * (MAX_SH_DEG + 1u);
     let coef_idx = 3u * (splat_idx * n + c_idx);
     // coefs are packed as  bytes (4x per u32)
@@ -161,18 +161,18 @@ fn sh_coef(splat_idx: u32, c_idx: u32) -> Vec3<f32> {
     }
     let r = coef_idx % 4u;
     if r == 0u {
-        return Vec3<f32>(v1.xyz);
+        return vec3<f32>(v1.xyz);
     } else if r == 1u {
-        return Vec3<f32>(v1.yzw);
+        return vec3<f32>(v1.yzw);
     } else if r == 2u {
-        return Vec3<f32>(v1.zw, v2.x);
+        return vec3<f32>(v1.zw, v2.x);
     } else { // r == 3u
-        return Vec3<f32>(v1.w, v2.xy);
+        return vec3<f32>(v1.w, v2.xy);
     }
 }
 
 // spherical harmonics evaluation with Condon–Shortley phase
-fn evaluate_sh(dir: Vec3<f32>, v_idx: u32, sh_deg: u32) -> Vec3<f32> {
+fn evaluate_sh(dir: vec3<f32>, v_idx: u32, sh_deg: u32) -> vec3<f32> {
     var result = SH_C0 * sh_coef(v_idx, 0u);
 
     if sh_deg > 0u {
@@ -205,7 +205,7 @@ fn evaluate_sh(dir: Vec3<f32>, v_idx: u32, sh_deg: u32) -> Vec3<f32> {
 }
 
 @compute @workgroup_size(256,1,1)
-fn preprocess(@builtin(global_invocation_id) gid: Vec3<u32>, @builtin(num_workgroups) wgs: Vec3<u32>) {
+fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) wgs: vec3<u32>) {
     let idx = gid.x;
     if idx >= arrayLength(&vertices) {
         return;
@@ -215,13 +215,13 @@ fn preprocess(@builtin(global_invocation_id) gid: Vec3<u32>, @builtin(num_workgr
     let viewport = camera.viewport;
     let vertex = vertices[idx];
     let geometric_info = geometries[vertex.geometry_idx];
-    let xyz = Vec3<f32>(unpack2x16float(vertex.pos_xy), unpack2x16float(vertex.pos_zw).x);
+    let xyz = vec3<f32>(unpack2x16float(vertex.pos_xy), unpack2x16float(vertex.pos_zw).x);
 
     if any(xyz < render_settings.clipping_box_min.xyz) || any(xyz > render_settings.clipping_box_max.xyz) {
         return;
     }
 
-    var camspace = camera.view * Vec4<f32>(xyz, 1.);
+    var camspace = camera.view * vec4<f32>(xyz, 1.);
     let pos2d = camera.proj * camspace;
     let bounds = 1.2 * pos2d.w;
     let z = pos2d.z / pos2d.w;
@@ -238,9 +238,9 @@ fn preprocess(@builtin(global_invocation_id) gid: Vec3<u32>, @builtin(num_workgr
     let scaling_factor = exp(dequantize(extractBits(i32(vertex.pos_zw), 3u * 8u, 8u), quantization.scaling_factor));
 
     let s2 = scaling_factor * scaling_factor;
-    let cov1: Vec2<f32> = unpack2x16float(geometric_info.cov[0]) * s2;
-    let cov2: Vec2<f32> = unpack2x16float(geometric_info.cov[1]) * s2;
-    let cov3: Vec2<f32> = unpack2x16float(geometric_info.cov[2]) * s2;
+    let cov1: vec2<f32> = unpack2x16float(geometric_info.cov[0]) * s2;
+    let cov2: vec2<f32> = unpack2x16float(geometric_info.cov[1]) * s2;
+    let cov3: vec2<f32> = unpack2x16float(geometric_info.cov[2]) * s2;
 
     let walltime = render_settings.walltime;
     var scale_mod = 0.;
@@ -292,27 +292,27 @@ fn preprocess(@builtin(global_invocation_id) gid: Vec3<u32>, @builtin(num_workgr
     let diagonal2 = cov[1][1] + kernel_size;
 
     let mid = 0.5 * (diagonal1 + diagonal2);
-    let radius = length(Vec2<f32>((diagonal1 - diagonal2) / 2.0, offDiagonal));
+    let radius = length(vec2<f32>((diagonal1 - diagonal2) / 2.0, offDiagonal));
     // eigenvalues of the 2D screen space splat
     let lambda1 = mid + max(radius, 0.1);
     let lambda2 = mid - max(radius, 0.1);
 
-    let diagonalVector = normalize(Vec2<f32>(offDiagonal, lambda1 - diagonal1));
+    let diagonalVector = normalize(vec2<f32>(offDiagonal, lambda1 - diagonal1));
     // scaled eigenvectors in screen space 
     let v1 = sqrt(2.0 * lambda1) * diagonalVector;
-    let v2 = sqrt(2.0 * lambda2) * Vec2<f32>(diagonalVector.y, -diagonalVector.x);
+    let v2 = sqrt(2.0 * lambda2) * vec2<f32>(diagonalVector.y, -diagonalVector.x);
 
     let v_center = pos2d.xyzw / pos2d.w;
 
     let camera_pos = camera.view_inv[3].xyz;
     let dir = normalize(xyz - camera_pos);
-    let color = Vec4<f32>(
-        max(Vec3<f32>(0.), evaluate_sh(dir, vertex.sh_idx, render_settings.max_sh_deg)),
+    let color = vec4<f32>(
+        max(vec3<f32>(0.), evaluate_sh(dir, vertex.sh_idx, render_settings.max_sh_deg)),
         opacity
     );
 
     let store_idx = atomicAdd(&sort_infos.keys_size, 1u);
-    let v = Vec4<f32>(v1 / viewport, v2 / viewport);
+    let v = vec4<f32>(v1 / viewport, v2 / viewport);
     points_2d[store_idx] = Splat(
         pack2x16float(v.xy), pack2x16float(v.zw),
         pack2x16float(v_center.xy),

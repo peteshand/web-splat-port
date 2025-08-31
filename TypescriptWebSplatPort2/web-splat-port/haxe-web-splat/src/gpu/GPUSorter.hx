@@ -222,9 +222,14 @@ class GPUSorter {
           'const rs_mem_sweep_2_offset: u32 = ' + rs_mem_sweep_2_offset + 'u;\n';
 
         var shader_code = header + raw;
+        // Rust/TS placeholders → concrete numbers
         shader_code = replaceAll(shader_code, '{histogram_wg_size}', Std.string(HISTOGRAM_WG_SIZE));
         shader_code = replaceAll(shader_code, '{prefix_wg_size}', Std.string(PREFIX_WG_SIZE));
         shader_code = replaceAll(shader_code, '{scatter_wg_size}', Std.string(SCATTER_WG_SIZE));
+        // Fix old WGSL vector spelling (VecN -> vecN)
+        shader_code = replaceAll(shader_code, 'Vec2<', 'vec2<');
+        shader_code = replaceAll(shader_code, 'Vec3<', 'vec3<');
+        shader_code = replaceAll(shader_code, 'Vec4<', 'vec4<');
 
         final shader = device.createShaderModule({ label: 'Radix sort shader', code: shader_code });
 
@@ -595,9 +600,10 @@ class GPUSorter {
       final encoder = device.createCommandEncoder({ label: 'GPUSorter test_sort' });
       this.record_sort(bind_group, n, encoder);
       queue.submit([encoder.finish()]);
-      // wait for submit + mapRead
-      final p = js.Syntax.code("(async ()=>{await this.queue.onSubmittedWorkDone(); return true;}).call({queue:queue})");
-      (cast p : Promise<Bool>).then(_ -> {
+
+      // wait for submit to finish
+      final p = js.Syntax.code("queue.onSubmittedWorkDone()");
+      (cast p : Promise<Dynamic>).then(_ -> {
         downloadBufferF32(device, queue, keyval_a, n).then(sorted -> {
           for (i in 0...n) {
             if (sorted[i] != i) {
@@ -630,10 +636,13 @@ private function downloadBufferF32(device:GPUDevice, queue:GPUQueue, src:GPUBuff
     final encoder = device.createCommandEncoder({ label: 'Copy encoder' });
     encoder.copyBufferToBuffer(src, 0, dst, 0, byteLength);
     queue.submit([encoder.finish()]);
-    final p = js.Syntax.code("(async ()=>{await this.queue.onSubmittedWorkDone(); return true;}).call({queue:queue})");
-    (cast p : Promise<Bool>).then(_ -> {
-      final p2 = js.Syntax.code("(async ()=>{await this.dst.mapAsync(GPUMapMode.READ); return true;}).call({dst:dst})");
-      (cast p2 : Promise<Bool>).then(_2 -> {
+
+    // wait for submit
+    final p = js.Syntax.code("queue.onSubmittedWorkDone()");
+    (cast p : Promise<Dynamic>).then(_ -> {
+      // map for read
+      final p2 = js.Syntax.code("dst.mapAsync(GPUMapMode.READ)");
+      (cast p2 : Promise<Dynamic>).then(_2 -> {
         final copy:js.lib.ArrayBuffer = dst.getMappedRange().slice(0);
         dst.unmap();
         dst.destroy();

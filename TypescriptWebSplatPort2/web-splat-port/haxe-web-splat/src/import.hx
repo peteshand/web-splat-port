@@ -45,6 +45,7 @@ import js.lib.Promise;
 import js.lib.ArrayBuffer;
 import js.lib.ArrayBufferView;
 //
+import js.html.URL;
 import js.html.TextEncoder;
 import js.html.TextDecoder;
 import js.html.Float32Array;

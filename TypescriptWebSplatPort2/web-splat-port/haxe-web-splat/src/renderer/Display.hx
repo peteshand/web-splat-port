@@ -1,5 +1,7 @@
 package renderer;
 
+import uniform.UniformBuffer;
+
 typedef RenderTarget = { view:GPUTextureView, bindGroup:GPUBindGroup };
 
 class Display {
@@ -23,16 +25,8 @@ class Display {
     return device.createBindGroupLayout({
       label: 'display.env.layout',
       entries: [
-        { // binding 0: texture
-          binding: 0,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: 'float', viewDimension: '2d' }
-        },
-        { // binding 1: sampler
-          binding: 1,
-          visibility: GPUShaderStage.FRAGMENT,
-          sampler: { type: 'filtering' }
-        }
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }
       ]
     });
   }
@@ -41,16 +35,8 @@ class Display {
     return device.createBindGroupLayout({
       label: 'display.blit.layout',
       entries: [
-        { // binding 0: texture
-          binding: 0,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: 'float', viewDimension: '2d' }
-        },
-        { // binding 1: sampler
-          binding: 1,
-          visibility: GPUShaderStage.FRAGMENT,
-          sampler: { type: 'filtering' }
-        }
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }
       ]
     });
   }
@@ -59,25 +45,20 @@ class Display {
     final placeholderView = device.createTexture({
       label: 'display.env.placeholder',
       format: 'rgba16float',
-      // cast to the strict type expected by the externs
       size: (cast { width: 1, height: 1 } : webgpu.GPUExtent3DStrict),
       usage: GPUTextureUsage.TEXTURE_BINDING
     }).createView();
 
     final textureView = envTexture != null ? envTexture : placeholderView;
-    final sampler = device.createSampler({
-      label: 'display.env.sampler',
-      magFilter: 'linear',
-      minFilter: 'linear'
-    });
+    final sampler = device.createSampler({ label: 'display.env.sampler', magFilter: 'linear', minFilter: 'linear' });
 
     final layout = envMapBindGroupLayout(device);
     return device.createBindGroup({
       label: 'display.env.bg',
       layout: layout,
       entries: [
-        { binding: 0, resource: textureView }, // texture first
-        { binding: 1, resource: sampler }      // sampler second
+        { binding: 0, resource: textureView },
+        { binding: 1, resource: sampler }
       ]
     });
   }
@@ -91,7 +72,7 @@ class Display {
     });
     final textureView = texture.createView();
     final sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
-  
+
     final layout = bindGroupLayout(device);
     final bindGroup = device.createBindGroup({
       label: 'display.blit.bg',
@@ -101,44 +82,59 @@ class Display {
         { binding: 1, resource: sampler }
       ]
     });
-  
+
     return { view: textureView, bindGroup: bindGroup };
   }
 
   public static function create(
     device:GPUDevice,
-    sourceFormat:GPUTextureFormat, // offscreen linear render target (e.g. 'rgba16float' or 'rgba8unorm')
-    targetFormat:GPUTextureFormat, // swapchain/deSRGB(surface_format)
+    sourceFormat:GPUTextureFormat, // offscreen linear render target
+    targetFormat:GPUTextureFormat, // swapchain deSRGB(surface_format)
     width:Int,
     height:Int
-  ):Promise<Display> {
-    return window.fetch('./shaders/display.wgsl')
-      .then(function(res) return res.text())
-      .then(function(code) {
-        var module = device.createShaderModule({ label: 'display.module', code: code });
-  
-        var pipeline = device.createRenderPipeline({
+  ):js.lib.Promise<Display> {
+    final url = new js.html.URL('./shaders/display.wgsl', js.Browser.window.location.href).href;
+    renderer.Internal.logi('[shader::display url]', url);
+
+    return js.Browser.window.fetch(url)
+      .then(res -> res.text())
+      .then(code -> {
+        trace('[shader::display head] ' + code.substr(0, 120));
+        if (code.indexOf('Vec2') >= 0 || code.indexOf('Vec3') >= 0 || code.indexOf('Vec4') >= 0) {
+          js.Browser.console.error('[shader::display] Found capitalized Vec* in WGSL (should be vec*). Check path / served file.');
+        }
+
+        final module = device.createShaderModule({ label: 'display.module', code: code });
+
+        final pipeline = device.createRenderPipeline({
           label: 'display.pipeline',
           layout: device.createPipelineLayout({
             label: 'display.pipeline.layout',
             bindGroupLayouts: [
-              bindGroupLayout(device),                // 0: source (texture+sampler)
-              envMapBindGroupLayout(device),          // 1: env (texture+sampler)
-              UniformBuffer.bind_group_layout(device),// 2: camera
-              UniformBuffer.bind_group_layout(device) // 3: render settings
+              bindGroupLayout(device),                 // 0: source (texture+sampler)
+              envMapBindGroupLayout(device),           // 1: env (texture+sampler)
+              UniformBuffer.bind_group_layout(device), // 2: camera
+              UniformBuffer.bind_group_layout(device)  // 3: render settings
             ]
           }),
           vertex:   { module: module, entryPoint: 'vs_main' },
           fragment: {
             module: module,
             entryPoint: 'fs_main',
-            targets: [{ format: targetFormat /* blend/writeMask if needed */ }]
+            targets: [{
+              format: targetFormat,
+              blend: {
+                color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+              },
+              writeMask: GPUColorWrite.ALL
+            }]
           },
           primitive: { topology: 'triangle-strip' }
         });
-  
-        var envBg = createEnvMapBg(device, null);
-        var rt = createRenderTarget(device, sourceFormat, width, height);
+
+        final envBg = createEnvMapBg(device, null);
+        final rt = createRenderTarget(device, sourceFormat, width, height);
         renderer.Internal.logi('[display::new]', 'render_target ' + width + 'x' + height + ' format=' + sourceFormat);
         return new Display(pipeline, sourceFormat, rt.view, rt.bindGroup, envBg);
       });

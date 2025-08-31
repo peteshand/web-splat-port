@@ -33,8 +33,8 @@ struct CameraUniforms {
     view_inv: mat4x4<f32>,
     proj: mat4x4<f32>,
     proj_inv: mat4x4<f32>,
-    viewport: Vec2<f32>,
-    focal: Vec2<f32>
+    viewport: vec2<f32>,
+    focal: vec2<f32>
 };
 
 struct Gaussian {
@@ -78,8 +78,8 @@ struct SortInfos {
 }
 
 struct RenderSettings {
-    clipping_box_min: Vec4<f32>,
-    clipping_box_max: Vec4<f32>,
+    clipping_box_min: vec4<f32>,
+    clipping_box_max: vec4<f32>,
     gaussian_scaling: f32,
     max_sh_deg: u32,
     show_env_map: u32,
@@ -87,7 +87,7 @@ struct RenderSettings {
     kernel_size: f32,
     walltime: f32,
     scene_extend: f32,
-    center: Vec3<f32>,
+    center: vec3<f32>,
 }
 
 @group(0) @binding(0)
@@ -114,15 +114,15 @@ var<storage, read_write> sort_dispatch: DispatchIndirect;
 var<uniform> render_settings: RenderSettings;
 
 /// reads the ith sh coef from the vertex buffer
-fn sh_coef(splat_idx: u32, c_idx: u32) -> Vec3<f32> {
+fn sh_coef(splat_idx: u32, c_idx: u32) -> vec3<f32> {
     let a = unpack2x16float(sh_coefs[splat_idx][(c_idx * 3u + 0u) / 2u])[(c_idx * 3u + 0u) % 2u];
     let b = unpack2x16float(sh_coefs[splat_idx][(c_idx * 3u + 1u) / 2u])[(c_idx * 3u + 1u) % 2u];
     let c = unpack2x16float(sh_coefs[splat_idx][(c_idx * 3u + 2u) / 2u])[(c_idx * 3u + 2u) % 2u];
-    return Vec3<f32>(a, b, c);
+    return vec3<f32>(a, b, c);
 }
 
 // spherical harmonics evaluation with Condon–Shortley phase
-fn evaluate_sh(dir: Vec3<f32>, v_idx: u32, sh_deg: u32) -> Vec3<f32> {
+fn evaluate_sh(dir: vec3<f32>, v_idx: u32, sh_deg: u32) -> vec3<f32> {
     var result = SH_C0 * sh_coef(v_idx, 0u);
 
     if sh_deg > 0u {
@@ -162,7 +162,7 @@ fn cov_coefs(v_idx: u32) -> array<f32,6> {
 }
 
 @compute @workgroup_size(256,1,1)
-fn preprocess(@builtin(global_invocation_id) gid: Vec3<u32>, @builtin(num_workgroups) wgs: Vec3<u32>) {
+fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) wgs: vec3<u32>) {
     let idx = gid.x;
     if idx >= arrayLength(&gaussians) {
         return;
@@ -173,14 +173,14 @@ fn preprocess(@builtin(global_invocation_id) gid: Vec3<u32>, @builtin(num_workgr
     let vertex = gaussians[idx];
     let a = unpack2x16float(vertex.pos_opacity[0]);
     let b = unpack2x16float(vertex.pos_opacity[1]);
-    let xyz = Vec3<f32>(a.x, a.y, b.x);
+    let xyz = vec3<f32>(a.x, a.y, b.x);
     var opacity = b.y;
 
     if any(xyz < render_settings.clipping_box_min.xyz) || any(xyz > render_settings.clipping_box_max.xyz) {
         return;
     }
 
-    var camspace = camera.view * Vec4<f32>(xyz, 1.);
+    var camspace = camera.view * vec4<f32>(xyz, 1.);
     let pos2d = camera.proj * camspace;
     let z = pos2d.z / pos2d.w;
 
@@ -246,27 +246,27 @@ fn preprocess(@builtin(global_invocation_id) gid: Vec3<u32>, @builtin(num_workgr
     let diagonal2 = cov[1][1] + kernel_size;
 
     let mid = 0.5 * (diagonal1 + diagonal2);
-    let radius = length(Vec2<f32>((diagonal1 - diagonal2) / 2.0, offDiagonal));
+    let radius = length(vec2<f32>((diagonal1 - diagonal2) / 2.0, offDiagonal));
     // eigenvalues of the 2D screen space splat
     let lambda1 = mid + radius;
     let lambda2 = max(mid - radius, 0.1);
 
-    let diagonalVector = normalize(Vec2<f32>(offDiagonal, lambda1 - diagonal1));
+    let diagonalVector = normalize(vec2<f32>(offDiagonal, lambda1 - diagonal1));
     // scaled eigenvectors in screen space 
     let v1 = sqrt(2.0 * lambda1) * diagonalVector;
-    let v2 = sqrt(2.0 * lambda2) * Vec2<f32>(diagonalVector.y, -diagonalVector.x);
+    let v2 = sqrt(2.0 * lambda2) * vec2<f32>(diagonalVector.y, -diagonalVector.x);
 
     let v_center = pos2d.xyzw / pos2d.w;
 
     let camera_pos = camera.view_inv[3].xyz;
     let dir = normalize(xyz - camera_pos);
-    let color = Vec4<f32>(
-        max(Vec3<f32>(0.), evaluate_sh(dir, idx, render_settings.max_sh_deg)),
+    let color = vec4<f32>(
+        max(vec3<f32>(0.), evaluate_sh(dir, idx, render_settings.max_sh_deg)),
         opacity
     );
 
     let store_idx = atomicAdd(&sort_infos.keys_size, 1u);
-    let v = Vec4<f32>(v1 / viewport, v2 / viewport);
+    let v = vec4<f32>(v1 / viewport, v2 / viewport);
     points_2d[store_idx] = Splat(
         pack2x16float(v.xy), pack2x16float(v.zw),
         pack2x16float(v_center.xy),

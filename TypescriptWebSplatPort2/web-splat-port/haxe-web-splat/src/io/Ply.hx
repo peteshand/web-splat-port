@@ -1,13 +1,11 @@
 package io;
 
-// io/ply.ts → Haxe port (1:1 with provided TS)
+// io/ply.ts → Haxe port with structured debug logging
 
 import pointcloud.Aabb;
 import pointcloud.Types;
-import io.Mod.GenericGaussianPointCloud;
 
-import js.html.TextEncoder;
-import js.html.TextDecoder;
+import io.Mod.GenericGaussianPointCloud;
 
 typedef PlyEncoding = String; // 'ascii' | 'binary_little_endian' | 'binary_big_endian'
 
@@ -20,6 +18,15 @@ typedef ParsedHeader = {
 };
 
 class PlyReader {
+  /* ------------------------------ DEBUG toggles ------------------------------ */
+  static inline var DEBUG_HEADER:Bool = true;            // header summary + lines
+  static inline var DEBUG_COUNTS:Bool = true;            // counts & layout
+  static inline var DEBUG_PAYLOAD_VIEW:Bool = true;      // f32 view / endianness
+  static inline var DEBUG_SAMPLE0:Bool = true;           // sample first vertex
+  static inline var DEBUG_VALIDATE_LENGTHS:Bool = true;  // expected vs actual f32 count
+  static var __LOGGED_SAMPLE__:Bool = false;
+
+  /* --------------------------------- state ---------------------------------- */
   var header:ParsedHeader;
   var dv:js.lib.DataView;
   var offset:Int;
@@ -39,10 +46,10 @@ class PlyReader {
     var numShCoefs = 0;
     for (n in this.header.vertexPropNames) if (StringTools.startsWith(n, "f_")) numShCoefs++;
     final deg = utils.Utils.shDegFromNumCoefs(Std.int(numShCoefs / 3));
-    if (deg == null) throw "number of sh coefficients " + numShCoefs + " cannot be mapped to sh degree";
+    if (deg == null) throw "PLY: number of SH coefs cannot be mapped to sh degree";
     this.sh_deg = deg;
 
-    // clamp debugging (kept off)
+    // counts
     final fileCount = this.header.vertexCount;
     this.num_points = fileCount;
 
@@ -50,6 +57,10 @@ class PlyReader {
     this.mip_splatting    = parseBoolFromComments(this.header.comments, "mip");
     this.kernel_size      = parseNumberFromComments(this.header.comments, "kernel_size");
     this.background_color = parseRGBFromComments(this.header.comments, "background_color");
+
+    if (DEBUG_COUNTS || DEBUG_HEADER) {
+      trace('[ply] ctor: sh_deg=' + this.sh_deg + ' num_points=' + this.num_points);
+    }
   }
 
   public static function new_(reader:js.lib.ArrayBuffer):PlyReader return new PlyReader(reader);
@@ -68,14 +79,16 @@ class PlyReader {
     // payload view (try to avoid copies)
     final payloadU8 = new js.lib.Uint8Array(this.dv.buffer, this.offset);
     var f32:js.lib.Float32Array;
+    var madeCopy = false;
 
     if (little) {
-      if ( (payloadU8.byteOffset & 0x3) == 0 ) {
+      if ((payloadU8.byteOffset & 0x3) == 0) {
         f32 = new js.lib.Float32Array(this.dv.buffer, this.offset);
       } else {
         final buf = new js.lib.ArrayBuffer(payloadU8.byteLength);
         new js.lib.Uint8Array(buf).set(payloadU8);
         f32 = new js.lib.Float32Array(buf);
+        madeCopy = true;
       }
     } else {
       final buf = new js.lib.ArrayBuffer(payloadU8.byteLength);
@@ -92,11 +105,31 @@ class PlyReader {
         i++;
       }
       f32 = new js.lib.Float32Array(buf);
+      madeCopy = true;
+    }
+
+    if (DEBUG_PAYLOAD_VIEW) {
+      trace('[ply] payload view: encoding=' + this.header.encoding
+        + ' byteOffset=' + payloadU8.byteOffset
+        + ' byteLength=' + payloadU8.byteLength
+        + ' madeCopy=' + madeCopy
+        + ' f32.len=' + f32.length);
+    }
+
+    // sanity: expected float count (assumes only vertex array follows header)
+    final floatsPerVertex = 3 + 3 + 3 + restCount + 1 + 3 + 4;
+    if (DEBUG_VALIDATE_LENGTHS) {
+      final expectFloats = n * floatsPerVertex;
+      if (expectFloats != f32.length) {
+        trace('[ply] WARN expected f32 len = num_points(' + n + ') * floatsPerVertex(' + floatsPerVertex + ') = ' + expectFloats + ', got ' + f32.length);
+      } else {
+        trace('[ply] payload length OK: ' + f32.length + ' floats (' + n + ' * ' + floatsPerVertex + ')');
+      }
     }
 
     // targets
-    final gaussU16 = new js.lib.Uint16Array(n * 10);       // 3 xyz, 1 opacity, 6 cov
-    final shU16    = new js.lib.Uint16Array(n * 16 * 3);   // 16 triplets per point
+    final gaussU16 = new js.lib.Uint16Array(n * 10);     // 3 xyz, 1 opacity, 6 cov
+    final shU16    = new js.lib.Uint16Array(n * 16 * 3); // 16 triplets per point
 
     // bbox + plane accumulators
     var minx = Math.POSITIVE_INFINITY, miny = Math.POSITIVE_INFINITY, minz = Math.POSITIVE_INFINITY;
@@ -105,6 +138,11 @@ class PlyReader {
     var sumx = 0.0, sumy = 0.0, sumz = 0.0;
     var sumxx = 0.0, sumyy = 0.0, sumzz = 0.0;
     var sumxy = 0.0, sumxz = 0.0, sumyz = 0.0;
+
+    // ranges we’ll log
+    var opMin =  1e9, opMax = -1e9;
+    var sMin =  1e9, sMax = -1e9;
+    var dcMin =  1e9, dcMax = -1e9;
 
     final cov6 = new js.lib.Float32Array(6);
 
@@ -124,6 +162,9 @@ class PlyReader {
       // SH DC
       final sb = p * 16 * 3;
       final dc_r = f32[idx++], dc_g = f32[idx++], dc_b = f32[idx++];
+      if (dc_r < dcMin) dcMin = dc_r; if (dc_r > dcMax) dcMax = dc_r;
+      if (dc_g < dcMin) dcMin = dc_g; if (dc_g > dcMax) dcMax = dc_g;
+      if (dc_b < dcMin) dcMin = dc_b; if (dc_b > dcMax) dcMax = dc_b;
       shU16[sb + 0] = f32_to_f16_fast(dc_r);
       shU16[sb + 1] = f32_to_f16_fast(dc_g);
       shU16[sb + 2] = f32_to_f16_fast(dc_b);
@@ -149,19 +190,33 @@ class PlyReader {
       }
 
       // opacity (sigmoid)
-      final opacity = utils.Utils.sigmoid(f32[idx++]);
+      final opacity = sigmoid(f32[idx++]);
+      if (opacity < opMin) opMin = opacity; if (opacity > opMax) opMax = opacity;
 
       // scales exp
       final s1 = Math.exp(f32[idx++]);
       final s2 = Math.exp(f32[idx++]);
       final s3 = Math.exp(f32[idx++]);
+      if (s1 < sMin) sMin = s1; if (s1 > sMax) sMax = s1;
+      if (s2 < sMin) sMin = s2; if (s2 > sMax) sMax = s2;
+      if (s3 < sMin) sMin = s3; if (s3 > sMax) sMax = s3;
 
       // quaternion (w,x,y,z) → normalize → [x,y,z,w]
       var qw = f32[idx++], qx = f32[idx++], qy = f32[idx++], qz = f32[idx++];
       final qn = Math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz);
       if (qn > 0) { qw /= qn; qx /= qn; qy /= qn; qz /= qn; }
 
-      utils.Utils.buildCovScalar(qx, qy, qz, qw, s1, s2, s3, cov6);
+      buildCovScalar(qx, qy, qz, qw, s1, s2, s3, cov6);
+
+      if (DEBUG_SAMPLE0 && !__LOGGED_SAMPLE__ && p == 0) {
+        __LOGGED_SAMPLE__ = true;
+        trace('[ply::sample0] pos=' + [px, py, pz]);
+        trace('[ply::sample0] opacity=' + opacity);
+        trace('[ply::sample0] scales(exp)=' + [s1, s2, s3]);
+        trace('[ply::sample0] quat(x,y,z,w)=' + [qx, qy, qz, qw]);
+        trace('[ply::sample0] cov6=' + [for (k in 0...6) cov6[k]]);
+        trace('[ply::sample0] SH_DC=' + [dc_r, dc_g, dc_b]);
+      }
 
       // pack gaussian halfs
       final gb = p * 10;
@@ -217,10 +272,26 @@ class PlyReader {
     }
 
     final bbox = new Aabb({ x:minx, y:miny, z:minz }, { x:maxx, y:maxy, z:maxz });
-    if (bbox.radius() < 10.0) up = null;
+
+    // ---- NEW: summary logs ---------------------------------------------------
+    if (DEBUG_COUNTS) {
+      final rad = bbox.radius();
+      trace('[ply::summary] bbox min=' + [minx,miny,minz] + ' max=' + [maxx,maxy,maxz] + ' radius=' + rad);
+      trace('[ply::summary] center=' + [cx,cy,cz] + ' up=' + (up == null ? 'null' : '[' + up.join(",") + ']'));
+      trace('[ply::summary] opacity[min,max]=[' + opMin + ',' + opMax + '] scales[min,max]=[' + sMin + ',' + sMax + '] SH_DC[min,max]=[' + dcMin + ',' + dcMax + ']');
+    }
+    // -------------------------------------------------------------------------
 
     final gaussBytes = new js.lib.Uint8Array(gaussU16.buffer);
     final shBytes    = new js.lib.Uint8Array(shU16.buffer);
+
+    if (DEBUG_COUNTS) {
+      trace('[ply] return: bytes gauss=' + gaussBytes.byteLength + ' sh=' + shBytes.byteLength
+        + ' sh_deg=' + sh_deg + ' n=' + n);
+      if (this.mip_splatting != null) trace('[ply] comment mip=' + this.mip_splatting);
+      if (this.kernel_size != null)   trace('[ply] comment kernel_size=' + this.kernel_size);
+      if (this.background_color != null) trace('[ply] comment background_color=' + this.background_color);
+    }
 
     return GenericGaussianPointCloud.new_packed(
       gaussBytes,
@@ -244,7 +315,7 @@ class PlyReader {
     final u8 = new js.lib.Uint8Array(data);
     final needle = utf8Bytes("end_header");
 
-    // Find "end_header"
+    // scan for "end_header"
     var endIdx = -1;
     var limit = u8.length - needle.length + 1;
     var i = 0;
@@ -267,13 +338,18 @@ class PlyReader {
 
     final headerText = asciiDecode(u8.subarray(0, headerEnd));
 
-    // Split lines (correct regex; not double-escaped)
-    var reNL = ~/\r?\n/;
-    var rawLines = reNL.split(headerText);
+    // Split lines robustly: use '\n' and trim to drop any trailing '\r'
+    var rawLines = headerText.split("\n");
     var lines = new Array<String>();
     for (line in rawLines) {
       var s = StringTools.trim(line);
       if (s.length > 0) lines.push(s);
+    }
+
+    if (DEBUG_HEADER) {
+      final preview = headerText.substr(0, Std.int(Math.min(headerText.length, 400)));
+      trace('[ply::header] headerBytes=' + headerEnd + ' lines=' + lines.length);
+      trace('[ply::header:preview] ' + preview.split("\n").join("\\n"));
     }
 
     var encoding:Null<PlyEncoding> = null;
@@ -282,35 +358,65 @@ class PlyReader {
     var vertexPropNames:Array<String> = [];
     var inVertexElement = false;
 
-    var reWS = ~/\s+/;
+    // small helper: whitespace tokenizer (spaces/tabs, collapses multiples)
+    inline function splitWS(s:String):Array<String> {
+      var t = StringTools.replace(s, "\t", " ");
+      while (t.indexOf("  ") != -1) t = StringTools.replace(t, "  ", " ");
+      var arr = t.split(" ");
+      var out = new Array<String>();
+      for (x in arr) if (x.length > 0) out.push(x);
+      return out;
+    }
+
     for (line in lines) {
       if (StringTools.startsWith(line, "comment ")) {
+        if (DEBUG_HEADER) trace('[ply::header] comment line: ' + line);
         comments.push(line.substr("comment ".length));
         continue;
       }
+
       if (StringTools.startsWith(line, "format ")) {
         if (line.indexOf("binary_little_endian") >= 0) encoding = "binary_little_endian";
         else if (line.indexOf("binary_big_endian") >= 0) encoding = "binary_big_endian";
         else if (line.indexOf("ascii") >= 0) encoding = "ascii";
         else throw 'PLY: unknown format in line "${line}"';
+        if (DEBUG_HEADER) trace('[ply::header] format line: ' + line + ' -> encoding=' + encoding);
         continue;
       }
+
       if (StringTools.startsWith(line, "element ")) {
-        final parts = reWS.split(line);
-        final elemName = parts[1];
-        inVertexElement = (elemName == "vertex");
-        if (inVertexElement) vertexCount = Std.parseInt(parts[2]);
+        // Parse explicitly to avoid regex/tokenizer quirks
+        final rest = line.substr("element ".length);
+        if (StringTools.startsWith(rest, "vertex ")) {
+          final countStr = StringTools.trim(rest.substr("vertex ".length));
+          vertexCount = Std.parseInt(countStr);
+          inVertexElement = true;
+          if (DEBUG_HEADER) trace('[ply::header] element vertex count=' + vertexCount);
+        } else {
+          inVertexElement = false;
+          if (DEBUG_HEADER) trace('[ply::header] element non-vertex: ' + rest);
+        }
         continue;
       }
+
       if (StringTools.startsWith(line, "property ") && inVertexElement) {
-        final parts = reWS.split(line);
+        final parts = splitWS(line);
         final name = parts[parts.length - 1];
         vertexPropNames.push(name);
+        if (DEBUG_HEADER) trace('[ply::header] property (vertex) name=' + name + ' parts=' + parts.join('|'));
         continue;
       }
     }
 
     if (encoding == null) throw "PLY: format line not found";
+    if (DEBUG_HEADER) {
+      trace('[ply::header] encoding=' + encoding
+        + ' vertexCount=' + vertexCount
+        + ' headerBytes=' + headerEnd);
+      trace('[ply::header] props=' + vertexPropNames.join(','));
+      if (comments.length > 0) trace('[ply::header] comments=' + comments.join(' | '));
+      if (vertexCount == 0) trace('[ply::header] WARNING: did not parse a non-zero vertexCount');
+    }
 
     return {
       encoding: encoding,
@@ -402,11 +508,59 @@ class PlyReader {
         if (idx >= 0) {
           final raw = StringTools.trim(c.substr(idx + 1));
           final parts = raw.split(",").map(s -> Std.parseFloat(StringTools.trim(s)));
-          final ok = (parts.length == 3) && Math.isFinite(parts[0]) && Math.isFinite(parts[1]) && Math.isFinite(parts[2]);
-          if (ok) return [parts[0], parts[1], parts[2]];
+          if (parts.length == 3 && parts.every(v -> Math.isFinite(v))) {
+            return [parts[0], parts[1], parts[2]];
+          }
         }
       }
     }
     return null;
   }
+}
+
+/* ----------------------------- math utils used ----------------------------- */
+
+private inline function buildCovScalar(
+  qx:Float, qy:Float, qz:Float, qw:Float,
+  sx:Float, sy:Float, sz:Float,
+  out6:js.lib.Float32Array
+):js.lib.Float32Array {
+  final d0 = sx * sx, d1 = sy * sy, d2 = sz * sz;
+
+  final xx = qx * qx, yy = qy * qy, zz = qz * qz;
+  final xy = qx * qy, xz = qx * qz, yz = qy * qz;
+  final wx = qw * qx, wy = qw * qy, wz = qw * qz;
+
+  final r00 = 1 - 2 * (yy + zz);
+  final r01 = 2 * (xy - wz);
+  final r02 = 2 * (xz + wy);
+
+  final r10 = 2 * (xy + wz);
+  final r11 = 1 - 2 * (xx + zz);
+  final r12 = 2 * (yz - wx);
+
+  final r20 = 2 * (xz - wy);
+  final r21 = 2 * (yz + wx);
+  final r22 = 1 - 2 * (xx + yy);
+
+  final rd00 = r00 * d0, rd01 = r01 * d1, rd02 = r02 * d2;
+  final rd10 = r10 * d0, rd11 = r11 * d1, rd12 = r12 * d2;
+  final rd20 = r20 * d0, rd21 = r21 * d1, rd22 = r22 * d2;
+
+  final m00 = rd00 * r00 + rd01 * r01 + rd02 * r02;
+  final m01 = rd00 * r10 + rd01 * r11 + rd02 * r12;
+  final m02 = rd00 * r20 + rd01 * r21 + rd02 * r22;
+
+  final m11 = rd10 * r10 + rd11 * r11 + rd12 * r12;
+  final m12 = rd10 * r20 + rd11 * r21 + rd12 * r22;
+
+  final m22 = rd20 * r20 + rd21 * r21 + rd22 * r22;
+
+  out6[0] = m00; out6[1] = m01; out6[2] = m02;
+  out6[3] = m11; out6[4] = m12; out6[5] = m22;
+  return out6;
+}
+
+private inline function sigmoid(x:Float):Float {
+  return x >= 0 ? 1.0 / (1.0 + Math.exp(-x)) : Math.exp(x) / (1.0 + Math.exp(x));
 }
