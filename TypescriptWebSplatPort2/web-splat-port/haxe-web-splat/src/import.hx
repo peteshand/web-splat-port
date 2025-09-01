@@ -44,11 +44,11 @@ import pointcloud.Types.QuantViewOrStruct;
 import js.lib.Promise;
 import js.lib.ArrayBuffer;
 import js.lib.ArrayBufferView;
+import js.lib.Float32Array;
 //
 import js.html.URL;
 import js.html.TextEncoder;
 import js.html.TextDecoder;
-import js.html.Float32Array;
 import js.html.Element;
 import js.html.Event;
 import js.html.KeyboardEvent;

@@ -1,19 +1,16 @@
 package pointcloud;
 
 class Utils {
+
+  public static inline function isArrayBufferView(?view:ArrayBufferView, ?q:pointcloud.Quantization.GaussianQuantization):Bool {
+    return view != null;
+  }
+
   // Zero-copy view over input bytes (ArrayBuffer or ArrayBufferView)
   public static inline function asBytes(src:haxe.extern.EitherType<ArrayBuffer, ArrayBufferView>):js.lib.Uint8Array {
     return Std.isOfType(src, ArrayBuffer)
       ? new js.lib.Uint8Array(cast src)
       : (function(v:ArrayBufferView) return new js.lib.Uint8Array(v.buffer, v.byteOffset, v.byteLength))(cast src);
-  }
-
-  public static inline function isArrayBufferView(x:Dynamic):Bool {
-    // Keep Dynamic here because we need a runtime guard
-    return x != null
-      && Reflect.hasField(x, "buffer")
-      && Std.isOfType(Reflect.field(x, "buffer"), ArrayBuffer)
-      && Reflect.hasField(x, "byteLength");
   }
 
   // (optional) f16 → f32

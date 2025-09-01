@@ -468,19 +468,12 @@ class WindowContext {
   public inline function needsRedraw():Bool return _changed;
 
   // -------- helpers --------
-  static inline function toVec3(v:Dynamic):Vec3 {
-    if (Std.isOfType(v, Array)) {
-      var a:Array<Float> = cast v;
-      return Vec3.fromValues(a[0], a[1], a[2]);
-    }
-    return Vec3.fromValues(Reflect.field(v, "x"), Reflect.field(v, "y"), Reflect.field(v, "z"));
+  static inline function toVec3(v:Array<Float>):Vec3 {
+    return Vec3.fromValues(v[0], v[1], v[2]);
   }
-  static inline function toQuat(v:Dynamic):Quat {
-    if (Std.isOfType(v, Array)) {
-      var a:Array<Float> = cast v;
-      return Quat.fromValues(a[0], a[1], a[2], a[3]);
-    }
-    return cast v;
+  static inline function toQuat(v:Mat3x3):Quat {
+    var a:Array<Float> = cast v;
+    return Quat.fromValues(a[0], a[1], a[2], a[3]);
   }
 
   static inline function getCurrentTextureSafe(ctx:GPUCanvasContext):Null<GPUTexture> {

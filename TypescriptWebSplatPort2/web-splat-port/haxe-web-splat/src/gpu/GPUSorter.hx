@@ -98,7 +98,6 @@ class GPUSorter {
   // ---- Creation entrypoint (mirrors async new(device, queue)) ----
   public static function create(device:GPUDevice, queue:GPUQueue):Promise<GPUSorter> {
     return new Promise((resolve, reject) -> {
-      trace('Searching for the maximum subgroup size (browser WebGPU cannot query it).');
       final sizes = [1, 8, 16, 32];
       var curIdx = 2; // start at 16 like Rust
       var state = State.Init;
@@ -112,16 +111,13 @@ class GPUSorter {
             reject('GPUSorter.create(): No workgroup size worked. Unable to use sorter.');
             return;
           }
-          trace('Created a sorter with subgroup size ' + curSorter.subgroup_size);
           resolve(curSorter);
           return;
         }
 
         final size = sizes[curIdx];
-        trace('Checking sorting with subgroup size ' + size);
         GPUSorter.newWithSgSize(device, size).then(candidate -> {
           candidate.test_sort(device, queue).then(ok -> {
-            trace(size + ' worked: ' + ok);
             if (ok) curSorter = candidate;
 
             switch (state) {
@@ -142,7 +138,6 @@ class GPUSorter {
                   if (curSorter == null || biggestThatWorked == 0) {
                     reject('GPUSorter.create(): No workgroup size worked. Unable to use sorter.');
                   } else {
-                    trace('Created a sorter with subgroup size ' + curSorter.subgroup_size);
                     resolve(curSorter);
                   }
                   return;
@@ -153,7 +148,6 @@ class GPUSorter {
                   if (curSorter == null || biggestThatWorked == 0) {
                     reject('GPUSorter.create(): No workgroup size worked. Unable to use sorter.');
                   } else {
-                    trace('Created a sorter with subgroup size ' + curSorter.subgroup_size);
                     resolve(curSorter);
                   }
                   return;

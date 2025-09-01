@@ -2,6 +2,7 @@ package uniform;
 
 import js.lib.ArrayBufferView;
 import js.lib.Uint8Array;
+import js.Syntax;
 
 /** Simple logger gate shared across modules. */
 private inline function loggingEnabled():Bool {
@@ -18,16 +19,16 @@ private function hashBytesU64View(v:ArrayBufferView):String {
     ? cast v
     : new Uint8Array(cast v.buffer, v.byteOffset, v.byteLength);
 
-  // BigInt arithmetic via untyped to keep JS target fast & exact.
-  var h:Dynamic = untyped __js__("0xcbf29ce484222325n");
-  final prime:Dynamic = untyped __js__("0x100000001b3n");
-  final mask:Dynamic  = untyped __js__("0xffffffffffffffffn");
+  // BigInt arithmetic via js.Syntax.code to avoid __js__ deprecation warnings.
+  var h:Dynamic     = Syntax.code("0xcbf29ce484222325n");
+  final prime:Dynamic = Syntax.code("0x100000001b3n");
+  final mask:Dynamic  = Syntax.code("0xffffffffffffffffn");
 
   for (i in 0...u8.length) {
-    h = untyped (h ^ __js__("BigInt")(u8[i]));
-    h = untyped ((h * prime) & mask);
+    h = Syntax.code("({0} ^ BigInt({1}))", h, u8[i]);
+    h = Syntax.code("(({0} * {1}) & {2})", h, prime, mask);
   }
-  var hex:String = untyped h.toString(16);
+  var hex:String = Syntax.code("{0}.toString(16)", h);
   while (hex.length < 16) hex = "0" + hex;
   return hex;
 }
