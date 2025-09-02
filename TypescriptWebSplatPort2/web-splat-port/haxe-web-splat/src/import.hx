@@ -9,8 +9,10 @@ import js.Browser.window;
 import webgpu.*;
 import gl_matrix.*;
 import fflate.*;
+import resize.*;
 //
 import lib.*;
+//
 import io.*;
 import scene.*;
 import gpu.*;
