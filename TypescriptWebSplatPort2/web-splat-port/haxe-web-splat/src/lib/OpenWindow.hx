@@ -14,13 +14,6 @@ import scene.Scene;
 // 🔽 NEW: import the input binder
 import lib.EguiWGPU.Internal;
 
-// Minimal extern for ResizeObserver
-@:native("ResizeObserver")
-extern class ResizeObserver {
-  public function new(cb:Dynamic->Void):Void;
-  public function observe(target:js.html.Element):Void;
-}
-
 class OpenWindow {
   /** open_window(file, scene, config, pointcloud_file_path, scene_file_path) */
   public static function open_window(
