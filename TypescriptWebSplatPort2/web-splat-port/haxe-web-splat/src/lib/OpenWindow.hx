@@ -14,8 +14,9 @@ import scene.Scene;
 // 🔽 NEW: import the input binder
 import lib.EguiWGPU.Internal;
 
+// ...imports unchanged...
+
 class OpenWindow {
-  /** open_window(file, scene, config, pointcloud_file_path, scene_file_path) */
   public static function open_window(
     file:ArrayBuffer,
     sceneBuf:Null<ArrayBuffer>,
@@ -24,55 +25,66 @@ class OpenWindow {
     scene_file_path:Null<String>
   ):Promise<Dynamic> {
     return new js.lib.Promise(function (resolve, reject) {
-      var canvas:CanvasElement = cast document.getElementById('window-canvas');
+      var doc = Browser.document;
+      var canvas:CanvasElement = cast doc.getElementById('window-canvas');
       if (canvas == null) {
-        canvas = Browser.document.createCanvasElement();
+        canvas = doc.createCanvasElement();
         canvas.id = 'window-canvas';
-        canvas.style.width = '100%';
+        canvas.style.width  = '100%';
         canvas.style.height = '100%';
-        document.body.appendChild(canvas);
+        canvas.style.display = 'block'; // avoid inline-block whitespace quirks
+        doc.body.appendChild(canvas);
+
+        // Ensure page can actually be 100% tall
+        untyped doc.documentElement.style.height = '100%';
+        doc.body.style.height = '100%';
+        doc.body.style.margin = '0';
       }
 
-      // backing size from CSS * DPR
-      var backingFromCss = function() {
-        var rect = canvas.getBoundingClientRect();
-        var dpr:Float = (untyped Browser.window.devicePixelRatio) != null ? (untyped Browser.window.devicePixelRatio) : 1.0;
-        var w = Math.round(rect.width * dpr);
-        var h = Math.round(rect.height * dpr);
+      inline function backingFromCss() {
+        final rect = canvas.getBoundingClientRect();
+        final dpr:Float = (untyped Browser.window.devicePixelRatio != null)
+          ? (untyped Browser.window.devicePixelRatio)
+          : 1.0;
+        final w = Math.max(1, Math.floor(rect.width  * dpr));
+        final h = Math.max(1, Math.floor(rect.height * dpr));
+        Internal.clog('backingFromCss()', {
+          cssW: rect.width, cssH: rect.height, dpr: dpr, w: w, h: h
+        });
         return { w: w, h: h, dpr: dpr };
-      };
+      }
 
-      // init size 800x600 (like Rust)
+      // --- Phase 0: capture real size BEFORE init (matches TS) ---
+      final real = backingFromCss();
+
+      // --- Phase 1: init at 800x600 (like Rust) ---
       canvas.width  = 800;
       canvas.height = 600;
 
-      // create WindowContext
       WindowContext.create(canvas, file, config).then(function(state) {
-        // 🔽 NEW: bind DOM input to the camera controller (1:1 with TS open_window.ts)
         final unbindInput = Internal.bind_input(canvas, state.controller);
 
-        // store paths (typed)
         state.pointcloud_file_path = pointcloud_file_path;
         state.scene_file_path = scene_file_path;
 
-        // Phase 2: resize to real backing store
-        var applyRealSize = function() {
-          var now = backingFromCss();
-          if (canvas.width != now.w)  canvas.width  = now.w;
-          if (canvas.height != now.h) canvas.height = now.h;
-          state.resize({ width: now.w, height: now.h }, now.dpr);
-        };
+        // --- Phase 2: immediately resize to real backing-store size (matches TS) ---
+        function applyRealSize() {
+          final now = backingFromCss();
+          if (canvas.width  != now.w) canvas.width  = Std.int(now.w);
+          if (canvas.height != now.h) canvas.height = Std.int(now.h);
+          state.resize({ width: Std.int(now.w), height: Std.int(now.h) }, now.dpr);
+        }
         applyRealSize();
 
         // Observe/responsive
         try {
-          var ro = new ResizeObserver(function(_){ applyRealSize(); });
+          final ro = new ResizeObserver(function(_){ applyRealSize(); });
           ro.observe(canvas);
         } catch (_:Dynamic) {}
         Browser.window.addEventListener('resize', function(_){ applyRealSize(); });
         Browser.window.addEventListener('orientationchange', function(_){ applyRealSize(); });
 
-        // Optional scene JSON
+        // Optional scene JSON (unchanged) ...
         if (sceneBuf != null) {
           try {
             var td = new TextDecoder("utf-8");
@@ -86,12 +98,11 @@ class OpenWindow {
           }
         }
 
-        // Optional env map (if config.skybox exists)
         if (config.skybox != null) {
           state.set_env_map(config.skybox);
         }
 
-        // Main loop
+        // Main loop (unchanged) ...
         var last = Browser.window.performance.now();
         function loop(_:Float):Void {
           var now = Browser.window.performance.now();
@@ -103,7 +114,6 @@ class OpenWindow {
           var shapes:Dynamic = null;
           var request_redraw:Bool = false;
 
-          // UI
           var uiRes = state.ui();
           if (uiRes != null && uiRes.length >= 2) {
             request_redraw = uiRes[0] == true;

@@ -66,22 +66,16 @@ class PerspectiveProjection {
 
   public function resize(width: Float, height: Float): Void {
     final prev = { fovx: this.fovx, fovy: this.fovy };
-    final aspect = width / Math.max(1.0, height);
-
-    // Use proper trig so focal stays consistent. Keep the “major” FOV fixed,
-    // mirroring your TS intent (wide: keep fovx; tall: keep fovy).
-    if (width >= height) {
-      final tx = Math.tan(this.fovx * 0.5);
-      final ty = (tx / aspect) * this.fov2view_ratio;
-      this.fovy = 2.0 * Math.atan(ty);
+    final ratio = width / Math.max(1.0, height);
+  
+    if (width > height) {
+      this.fovy = (this.fovx / ratio) * this.fov2view_ratio;
     } else {
-      final ty = Math.tan(this.fovy * 0.5);
-      final tx = (ty * aspect) / Math.max(1e-12, this.fov2view_ratio);
-      this.fovx = 2.0 * Math.atan(tx);
+      this.fovx = this.fovy * ratio * this.fov2view_ratio;
     }
-
+  
     Internal.clog('PerspectiveProjection.resize()', {
-      width: width, height: height, ratio: aspect,
+      width: width, height: height, ratio: ratio,
       before: prev, after: { fovx: this.fovx, fovy: this.fovy },
       fov2view_ratio: this.fov2view_ratio
     });
