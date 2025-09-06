@@ -47,7 +47,7 @@ class Internal {
   }
 
   // -------------------------- debug readback + dumps --------------------------
-  public static inline var DEBUG_READBACK_EVERY_N_FRAMES:Int = 1; // set to 0 to disable
+  public static inline var DEBUG_READBACK_EVERY_N_FRAMES:Int = 0; // set to 0 to disable
 
   public static function u8ToU32LE(u8:js.lib.Uint8Array):js.lib.Uint32Array {
     var n = Math.floor(u8.byteLength / 4);

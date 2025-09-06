@@ -24,8 +24,8 @@ class PointCloud {
   var bbox_:Aabb;
   var compressed_:Bool;
 
-  var center_:Types.Vec3;
-  var up_:Null<Types.Vec3>;
+  var center_:Vec3;
+  var up_:Null<Vec3>;
 
   var mip_splatting_:Null<Bool>;
   var kernel_size_:Null<Float>;
@@ -36,13 +36,13 @@ class PointCloud {
   var _shSrc:Null<js.lib.Uint8Array>;
 
   /** Async-style factory to mirror TS usage: `await PointCloud.create(device, pc)` */
-  public static function create(device:GPUDevice, pc:Types.GenericGaussianPointCloud):Promise<PointCloud> {
+  public static function create(device:GPUDevice, pc:GenericGaussianPointCloud):Promise<PointCloud> {
     // All work here is synchronous; return a resolved Promise for parity with TS.
     return Promise.resolve(new PointCloud(device, pc));
   }
 
   /** Actual constructor */
-  public function new(device:GPUDevice, pc:Types.GenericGaussianPointCloud) {
+  public function new(device:GPUDevice, pc:GenericGaussianPointCloud) {
     // Persist zero-copy byte views exactly once
     console.log(pc);
     var gaussBytes:js.lib.Uint8Array = Utils.asBytes(pc.gaussian_buffer());
@@ -205,8 +205,8 @@ class PointCloud {
   public inline function mipSplatting():Null<Bool> return mip_splatting_;          // TS convenience
   public inline function dilation_kernel_size():Null<Float> return kernel_size_;   // exact Rust
   public inline function dilationKernelSize():Null<Float> return kernel_size_;     // TS convenience
-  public inline function center():Types.Vec3 return center_;
-  public inline function up():Null<Types.Vec3> return up_;
+  public inline function center():Vec3 return center_;
+  public inline function up():Null<Vec3> return up_;
 
   // ---- static bind group layouts (exact bindings/visibility as Rust) ----
   public static inline function bind_group_layout_compressed(device:GPUDevice):GPUBindGroupLayout {
