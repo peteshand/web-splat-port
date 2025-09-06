@@ -1,16 +1,15 @@
 package build;
 
+#if macro
 import haxe.macro.Context;
 import sys.FileSystem;
 import sys.io.File;
-
-
-
-
-#if macro
 using StringTools;
+#end
 
 class Build {
+
+  #if macro
   /** Generic entry point: embed all files under `root` whose names end with any of `exts` (e.g. [".css", ".json"]). */
   public static function embedAll(root:String, exts:Array<String>) {
     if (exts == null || exts.length == 0) return;
@@ -66,5 +65,17 @@ class Build {
     }
     return false;
   }
+  #else
+  public static function injectCss() {
+    // Inject any packaged CSS
+    for (name in Resource.listNames()) {
+      if (StringTools.endsWith(name, ".css")) {
+        var css = Resource.getString(name);
+        var style:StyleElement = cast Browser.document.createElement("style");
+        style.appendChild(Browser.document.createTextNode(css));
+        Browser.document.head.appendChild(style);
+      }
+    }
+  }
+  #end
 }
-#end

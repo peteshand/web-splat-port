@@ -1,9 +1,6 @@
 package io;
 
-// io/ply.ts → Haxe port with structured debug logging
-
 import pointcloud.Aabb;
-import pointcloud.Types;
 
 import io.Mod.GenericGaussianPointCloud;
 
@@ -19,11 +16,11 @@ typedef ParsedHeader = {
 
 class PlyReader {
   /* ------------------------------ DEBUG toggles ------------------------------ */
-  static inline var DEBUG_HEADER:Bool = true;            // header summary + lines
-  static inline var DEBUG_COUNTS:Bool = true;            // counts & layout
-  static inline var DEBUG_PAYLOAD_VIEW:Bool = true;      // f32 view / endianness
-  static inline var DEBUG_SAMPLE0:Bool = true;           // sample first vertex
-  static inline var DEBUG_VALIDATE_LENGTHS:Bool = true;  // expected vs actual f32 count
+  static inline var DEBUG_HEADER:Bool = false;            // header summary + lines
+  static inline var DEBUG_COUNTS:Bool = false;            // counts & layout
+  static inline var DEBUG_PAYLOAD_VIEW:Bool = false;      // f32 view / endianness
+  static inline var DEBUG_SAMPLE0:Bool = false;           // sample first vertex
+  static inline var DEBUG_VALIDATE_LENGTHS:Bool = false;  // expected vs actual f32 count
   static var __LOGGED_SAMPLE__:Bool = false;
 
   /* --------------------------------- state ---------------------------------- */

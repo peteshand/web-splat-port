@@ -1,25 +1,26 @@
 package lib;
 
-class WGPUContext {
+import js.Browser;
+import js.lib.Promise;
+
+class GPUContext {
   public var device:GPUDevice;
   public var queue:GPUQueue;
-  public var adapter:Dynamic; // use GPUAdapter if you have an extern; Dynamic is fine
+  public var adapter:Dynamic; // use GPUAdapter extern if available
 
-  // TS constructs with `new WGPUContext()` then assigns fields.
   private function new() {}
 
   /**
    * TS: static async new(_instance?, _surface?) -> WGPUContext
-   * Haxe: use a named factory to avoid ctor conflicts.
+   * Haxe: named factory to avoid ctor conflicts.
    * NOTE: _instance and _surface are accepted for parity but not used (same as TS).
    */
-  public static function create(?_instance:Dynamic, ?_surface:GPUCanvasContext):Promise<WGPUContext> {
+  public static function create(?_instance:Dynamic, ?_surface:GPUCanvasContext):Promise<GPUContext> {
     return new Promise(function(resolve, reject) {
-      var nav:Dynamic = js.Browser.navigator;
+      var nav:Dynamic = Browser.navigator;
       var gpu:Dynamic = nav.gpu;
       if (gpu == null) { reject('WebGPU not available'); return; }
 
-      // Type as js.lib.Promise so .catchError maps to native .catch
       var adapterP:js.lib.Promise<Dynamic> = cast gpu.requestAdapter();
 
       adapterP.then(function(adapter:Dynamic) {
@@ -29,7 +30,7 @@ class WGPUContext {
         var devP:js.lib.Promise<GPUDevice> = cast adapter.requestDevice(desc);
 
         return devP.then(function(device:GPUDevice) {
-          var ctx = new WGPUContext();
+          var ctx = new GPUContext();
           ctx.adapter = adapter;
           ctx.device = device;
           ctx.queue  = device.queue;
@@ -48,7 +49,7 @@ class WGPUContext {
   }
 
   /** TS helper parity */
-  public static inline function new_instance():Promise<WGPUContext> {
+  public static inline function new_instance():Promise<GPUContext> {
     return create(null, null);
   }
 }

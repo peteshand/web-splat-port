@@ -3,7 +3,6 @@ package io;
 // io/npz.ts → Haxe port (sync, fast, minimal allocations)
 
 import haxe.DynamicAccess;
-import pointcloud.Types;
 import pointcloud.Quantization;
 import io.Mod.GenericGaussianPointCloud;
 import io.Mod.PointCloudReader;
@@ -338,7 +337,7 @@ class NpzReader implements PointCloudReader {
     }
 
     // build compressed gaussians
-    final gaussians = new Array<Types.GaussianCompressed>();
+    final gaussians = new Array<GaussianCompressed>();
     gaussians.resize(S);
     for (i in 0...S) {
       final ix = i * 3;

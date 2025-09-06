@@ -6,6 +6,8 @@ import js.Browser.navigator;
 import js.Browser.document;
 import js.Browser.window;
 //
+import build.Build;
+//
 import webgpu.*;
 import gl_matrix.*;
 import fflate.*;
@@ -27,7 +29,7 @@ import utils.Utils.shNumCoefficients;
 import utils.Utils.sigmoid;
 //
 import renderer.*;
-import renderer.SplattingArgs.SplattingArgsConst;
+import renderer.SplattingArgsConst;
 //
 import camera.*;
 import camera.Internal;
@@ -35,13 +37,7 @@ import camera.Types.Camera;
 import camera.Types.FrustumPlanes;
 //
 import pointcloud.*;
-import pointcloud.Types.Point3f32;
-import pointcloud.Types.Vector3f32;
-import pointcloud.Types.Gaussian;
-import pointcloud.Types.GaussianCompressed;
-import pointcloud.Types.Covariance3D;
-import pointcloud.Types.ABOrView;
-import pointcloud.Types.QuantViewOrStruct;
+import pointcloud.types.*;
 //
 import js.lib.Promise;
 import js.lib.ArrayBuffer;
@@ -61,6 +57,7 @@ import js.html.HtmlElement;
 import js.html.ParagraphElement;
 import js.html.DivElement;
 import js.html.SpanElement;
+import js.html.StyleElement;
 import js.html.CanvasElement;
 import js.html.ImageElement;
 import js.html.CustomEvent;

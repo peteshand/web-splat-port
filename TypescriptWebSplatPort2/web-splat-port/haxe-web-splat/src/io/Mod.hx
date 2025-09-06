@@ -1,23 +1,16 @@
 package io;
 
 import pointcloud.Aabb;
-import pointcloud.Types;
 import pointcloud.Quantization;
-import io.Ply.PlyReader;
-import io.Npz.NpzReader;
-import io.Npz.ZipNpzArchive;
-
-// Aliases for brevity
-typedef Vec3  = pointcloud.Types.Vec3;
-typedef Color3 = pointcloud.Types.Color3;
-typedef ABOrView = pointcloud.Types.ABOrView;
-typedef QuantViewOrStruct = pointcloud.Types.QuantViewOrStruct;
+import io.PlyReader;
+import io.NpzReader;
+import io.NpzReader.ZipNpzArchive;
 
 /* ------------------------- helpers for fixed-length SH ------------------------- */
 typedef SHTriplet = Array<Float>; // length 3 expected
 typedef SHBlock16 = Array<SHTriplet>;
 
-typedef PlaneResult = { center: Types.Point3f32, up: Null<Types.Vector3f32> };
+typedef PlaneResult = { center: Point3f32, up: Null<Vector3f32> };
 
 /* ----------------------------- Reader interface ----------------------------- */
 interface PointCloudReader {
@@ -27,7 +20,7 @@ interface PointCloudReader {
 
 /* ---------------------- GenericGaussianPointCloud ---------------------- */
 /** Concrete loader/holder that implements pointcloud.GenericGaussianPointCloud. */
-class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud {
+class GenericGaussianPointCloud implements pointcloud.types.GenericGaussianPointCloud {
   // packed byte views (what the renderer expects)
   var gaussiansBytes: js.lib.Uint8Array;
   var shCoefsBytes:   js.lib.Uint8Array;
@@ -51,7 +44,7 @@ class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud 
   var _aabb:Aabb;
 
   // Optional parsed (uncompressed) gaussians
-  var _gaussiansParsed: Null<Array<Types.Gaussian>> = null;
+  var _gaussiansParsed: Null<Array<Gaussian>> = null;
 
   /* ------------------------------- factories ------------------------------- */
 
@@ -73,7 +66,7 @@ class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud 
 
   /** Uncompressed constructor (named factory in lieu of static new in Haxe) */
   public static function make_uncompressed(
-    gaussians: Array<Types.Gaussian>,
+    gaussians: Array<Gaussian>,
     sh_coefs: Array<SHBlock16>,
     sh_deg: Int,
     num_points: Int,
@@ -86,7 +79,7 @@ class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud 
     var bbox = Aabb.zeroed();
     for (g in gaussians) bbox.grow({ x: g.xyz.x, y: g.xyz.y, z: g.xyz.z });
 
-    var points:Array<Types.Point3f32> = [];
+    var points:Array<Point3f32> = [];
     for (g in gaussians) points.push({ x: g.xyz.x, y: g.xyz.y, z: g.xyz.z });
 
     var pr = plane_from_points(points);
@@ -152,7 +145,7 @@ class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud 
 
   /** Compressed path (npz) */
   public static function new_compressed(
-    gaussians: Array<Types.GaussianCompressed>,
+    gaussians: Array<GaussianCompressed>,
     sh_coefs_packed: js.lib.Uint8Array,
     sh_deg: Int,
     num_points: Int,
@@ -165,7 +158,7 @@ class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud 
     var bbox = Aabb.unit();
     for (v in gaussians) bbox.grow({ x: v.xyz.x, y: v.xyz.y, z: v.xyz.z });
 
-    var points:Array<Types.Point3f32> = [];
+    var points:Array<Point3f32> = [];
     for (g in gaussians) points.push({ x: g.xyz.x, y: g.xyz.y, z: g.xyz.z });
 
     var pr = plane_from_points(points);
@@ -209,7 +202,7 @@ class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud 
     center: Vec3,
     bbox: Aabb,
     compressed: Bool,
-    parsed: Null<Array<Types.Gaussian>>
+    parsed: Null<Array<Gaussian>>
   ) {
     this.gaussiansBytes = gaussiansBytes;
     this.shCoefsBytes   = shCoefsBytes;
@@ -239,7 +232,7 @@ class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud 
   public inline function compressed():Bool return this._compressed;
 
   /* ------------------------------ extras (optional) ------------------------------ */
-  public function gaussians(): Array<Types.Gaussian> {
+  public function gaussians(): Array<Gaussian> {
     if (this._compressed) throw "Gaussians are compressed";
     if (this._gaussiansParsed != null) return this._gaussiansParsed;
     throw "Parsed gaussians not available";
@@ -298,7 +291,7 @@ class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud 
   }
 
   // Gaussian: 20 bytes each (3*f16 + f16 + 6*f16)
-  private static function packGaussiansF16(gaussians: Array<Types.Gaussian>): js.lib.Uint8Array {
+  private static function packGaussiansF16(gaussians: Array<Gaussian>): js.lib.Uint8Array {
     var BYTES_PER = 20;
     var buf = new js.lib.ArrayBuffer(gaussians.length * BYTES_PER);
     var view = new js.lib.DataView(buf);
@@ -339,7 +332,7 @@ class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud 
   }
 
   // Compressed: 16 bytes each
-  private static function packGaussiansCompressed(g: Array<Types.GaussianCompressed>): js.lib.Uint8Array {
+  private static function packGaussiansCompressed(g: Array<GaussianCompressed>): js.lib.Uint8Array {
     var BYTES_PER = 16;
     var buf = new js.lib.ArrayBuffer(g.length * BYTES_PER);
     var view = new js.lib.DataView(buf);
@@ -358,12 +351,12 @@ class GenericGaussianPointCloud implements pointcloud.GenericGaussianPointCloud 
   }
 
   // Plane fit helper (same math as before)
-  private static function plane_from_points(points: Array<Types.Point3f32>): PlaneResult {
+  private static function plane_from_points(points: Array<Point3f32>): PlaneResult {
     var n = points.length;
 
     var sumX = 0.0, sumY = 0.0, sumZ = 0.0;
     for (p in points) { sumX += p.x; sumY += p.y; sumZ += p.z; }
-    var centroid:Types.Point3f32 = {
+    var centroid:Point3f32 = {
       x: sumX / (n > 0 ? n : 1),
       y: sumY / (n > 0 ? n : 1),
       z: sumZ / (n > 0 ? n : 1)
