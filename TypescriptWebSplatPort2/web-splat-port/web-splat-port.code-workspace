@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "haxe-web-splat/node_modules/haxe/downloads/haxe/std"
+		}
+	],
+	"settings": {}
+}
