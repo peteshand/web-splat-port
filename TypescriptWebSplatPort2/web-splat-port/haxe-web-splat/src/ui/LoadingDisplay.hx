@@ -5,7 +5,7 @@ import js.html.Element;
 import js.html.CustomEvent;
 import js.html.svg.CircleElement;
 import js.html.svg.TextElement;
-import loader.GaussianLoader;
+import loader.Loader;
 
 /**
  * Encapsulates all user-facing loading UI:
@@ -13,7 +13,7 @@ import loader.GaussianLoader;
  * - "no WebGPU" / "no file" panes
  * - progress ring + MB text
  * - error pane
- * - binds/unbinds to GaussianLoader events
+ * - binds/unbinds to Loader events
  */
 class LoadingDisplay {
   var meter:CircleElement;
@@ -24,7 +24,7 @@ class LoadingDisplay {
   var paneError:Element;
 
   // keep references so we can unbind cleanly
-  var _loader:GaussianLoader;
+  var _loader:Loader;
 
   public function new() {
     meter       = cast Browser.document.querySelector(".meter-1");
@@ -67,23 +67,23 @@ class LoadingDisplay {
 
   /* ---------- loader binding ---------- */
 
-  public function bindToLoader(loader:GaussianLoader):Void {
+  public function bindToLoader(loader:Loader):Void {
     // clean previous bindings if any
     unbind();
 
     _loader = loader;
-    _loader.addEventListener(GaussianLoader.EVT_START,    cast onLoaderStart);
-    _loader.addEventListener(GaussianLoader.EVT_PROGRESS, cast onLoaderProgress);
-    _loader.addEventListener(GaussianLoader.EVT_END,      cast onLoaderEnd);
-    _loader.addEventListener(GaussianLoader.EVT_ERROR,    cast onLoaderError);
+    _loader.addEventListener(Loader.EVT_START,    cast onLoaderStart);
+    _loader.addEventListener(Loader.EVT_PROGRESS, cast onLoaderProgress);
+    _loader.addEventListener(Loader.EVT_END,      cast onLoaderEnd);
+    _loader.addEventListener(Loader.EVT_ERROR,    cast onLoaderError);
   }
 
   public function unbind():Void {
     if (_loader != null) {
-      _loader.removeEventListener(GaussianLoader.EVT_START,    cast onLoaderStart);
-      _loader.removeEventListener(GaussianLoader.EVT_PROGRESS, cast onLoaderProgress);
-      _loader.removeEventListener(GaussianLoader.EVT_END,      cast onLoaderEnd);
-      _loader.removeEventListener(GaussianLoader.EVT_ERROR,    cast onLoaderError);
+      _loader.removeEventListener(Loader.EVT_START,    cast onLoaderStart);
+      _loader.removeEventListener(Loader.EVT_PROGRESS, cast onLoaderProgress);
+      _loader.removeEventListener(Loader.EVT_END,      cast onLoaderEnd);
+      _loader.removeEventListener(Loader.EVT_ERROR,    cast onLoaderError);
       _loader = null;
     }
   }

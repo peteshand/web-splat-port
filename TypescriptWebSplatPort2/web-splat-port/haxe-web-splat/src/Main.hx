@@ -1,17 +1,16 @@
+// Main.hx
 package;
 
 import js.Browser;
 import js.html.URLSearchParams;
 import utils.GpuUtils;
 import ui.LoadingDisplay;
-import loader.GaussianLoader;
 
 @:expose
 class Main {
   static var _main:Main;
 
   var ui:LoadingDisplay;
-  var loader:GaussianLoader;
   var engine:lib.Engine;
 
   public static function main() {
@@ -46,27 +45,35 @@ class Main {
 
     ui.showSpinner();
 
-    // Create UI-bound loader for point cloud progress
-    loader = new GaussianLoader();
-    ui.bindToLoader(loader);
-
-    // Construct engine (constructor does the old initialize() work)
+    // Engine construction (init canvas etc.)
     engine = new lib.Engine();
 
-    // Delegate all async work to the engine
-    engine.load_from_urls_cb(
+    // Bind UI progress to the engine's internal loader
+    ui.bindToLoader(engine.loader);
+
+    // Load point cloud (required)
+    engine.addGaussian(
       pc_url,
-      scene_url,
-      loader,        // pc loader (UI bound)
-      null,          // optional scene loader (engine will create one if needed)
-      function() {   // onReady
+      function() {
         ui.hideSpinner();
       },
-      function(e) {  // onError
+      function(e) {
         ui.hideSpinner();
         ui.showError(e, pc_url);
       }
     );
+
+    // Load scene (optional, can be called before or after addGaussian)
+    if (scene_url != null) {
+      engine.addScene(
+        scene_url,
+        null, // no-op onReady
+        function(e) {
+          // Scene failure shouldn't mask the gaussian; surface an error toast
+          ui.showError(e, scene_url);
+        }
+      );
+    }
 
     return null;
   }

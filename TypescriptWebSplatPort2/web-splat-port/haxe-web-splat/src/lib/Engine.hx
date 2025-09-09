@@ -1,3 +1,4 @@
+// Engine.hx
 package lib;
 
 import js.Browser;
@@ -7,6 +8,7 @@ import js.lib.ArrayBuffer;
 import js.lib.Promise;
 import js.lib.Float32Array;
 import js.lib.Uint8Array;
+import haxe.extern.EitherType;
 
 import resize.ResizeObserver;
 
@@ -14,7 +16,9 @@ import lib.SurfaceContext;
 import lib.RenderConfig;
 import scene.Scene;
 import lib.EguiWGPU.Internal;
-import loader.GaussianLoader;
+import loader.Loader;
+
+typedef Source = EitherType<String, ArrayBuffer>;
 
 class Engine {
   // Instance state
@@ -30,6 +34,17 @@ class Engine {
   var _capturedW:Int = 800;
   var _capturedH:Int = 600;
   var _capturedDpr:Float = 1.0;
+
+  // When scene arrives before gaussian, stash it here
+  var _pendingSceneBytes:Null<ArrayBuffer> = null;
+  var _pendingScenePath:Null<String> = null;
+
+  // Internal generic progress-enabled loader for any URL fetches
+  var _loader:Loader;
+
+  /** Expose the internal loader so UIs can bind to its progress events. */
+  public var loader(get, never):Loader;
+  inline function get_loader():Loader return _loader;
 
   /** Create/reuse canvas, capture initial size, and store config. */
   public function new(?config:RenderConfig) {
@@ -55,133 +70,137 @@ class Engine {
     // Bootstrap at 800x600 like TS/Rust (SurfaceContext.resize will correct it)
     c.width  = 800;
     c.height = 600;
+
+    // Create the internal loader used for any URL sources
+    _loader = new Loader();
   }
 
   /** Convenience: check if SurfaceContext is ready */
   public var isReady(get, never):Bool;
   inline function get_isReady():Bool return state != null;
 
-  /**
-   * High-level bootstrap that loads the point cloud (required) and scene (optional)
-   * from URLs using provided loaders. Progress is emitted by the pcLoader you pass in.
-   */
-  public function load_from_urls_cb(
-    pcUrl:String,
-    ?sceneUrl:String,
-    ?pcLoader:GaussianLoader,
-    ?sceneLoader:GaussianLoader,
+  /* =========================================================================
+     Public API (callbacks, independent flows)
+     ========================================================================= */
+
+  /** Load/replace the point cloud. Starts SurfaceContext and render loop if needed. */
+  public function addGaussian(
+    source:Source,
     ?onReady:Void->Void,
     ?onError:Dynamic->Void
   ):Void {
-    if (pcUrl == null) {
-      if (onError != null) onError('Missing file URL');
+    resolveSource(
+      source,
+      null, // no special Accept header for gaussian data
+      function(bytes:ArrayBuffer, path:Null<String>) {
+        SurfaceContext.create(canvas, bytes, cfg).then(function(s) {
+          state = s;
+
+          // Bind input now that we have a controller
+          try {
+            _unbindInput = Internal.bind_input(canvas, state.controller);
+          } catch (_:Dynamic) {}
+
+          // Record source path
+          state.pointcloud_file_path = path;
+
+          // Resize to the captured backing-store size
+          applyCapturedSize();
+
+          // Responsive handlers
+          installResizeHandlers();
+
+          // Optional env map
+          try {
+            if (cfg.skybox != null && state.set_env_map != null) state.set_env_map(cfg.skybox);
+          } catch (_:Dynamic) {}
+
+          // If a scene was queued earlier, apply now
+          if (_pendingSceneBytes != null) {
+            try {
+              applySceneBytes(_pendingSceneBytes, _pendingScenePath);
+              _pendingSceneBytes = null;
+              _pendingScenePath  = null;
+            } catch (e:Dynamic) {
+              if (onError != null) onError(e);
+            }
+          }
+
+          // Start the render loop once
+          startLoop();
+
+          if (onReady != null) onReady();
+          return null;
+        }).catchError(function(e) {
+          if (onError != null) onError(e);
+          return null;
+        });
+      },
+      function(err:Dynamic) {
+        if (onError != null) onError(err);
+      }
+    );
+  }
+
+  /** Load/replace the scene (cameras, etc.). Safe to call before or after addGaussian(). */
+  public function addScene(
+    source:Source,
+    ?onReady:Void->Void,
+    ?onError:Dynamic->Void
+  ):Void {
+    resolveSource(
+      source,
+      "application/json", // hint JSON when going over HTTP
+      function(bytes:ArrayBuffer, path:Null<String>) {
+        if (state == null) {
+          // Stash until gaussian is ready
+          _pendingSceneBytes = bytes;
+          _pendingScenePath  = path;
+          if (onReady != null) onReady(); // staged
+          return;
+        }
+        // Apply immediately
+        try {
+          applySceneBytes(bytes, path);
+          if (onReady != null) onReady();
+        } catch (e:Dynamic) {
+          if (onError != null) onError(e);
+        }
+      },
+      function(err:Dynamic) {
+        if (onError != null) onError(err);
+      }
+    );
+  }
+
+  /* =========================================================================
+     Internals
+     ========================================================================= */
+
+  // Resolve Source (URL or ArrayBuffer) to bytes. If URL, use internal loader.
+  inline function resolveSource(
+    source:Source,
+    accept:Null<String>,
+    onOk:ArrayBuffer->Null<String>->Void,
+    onErr:Dynamic->Void
+  ):Void {
+    if ((source is ArrayBuffer)) {
+      onOk(cast source, null);
       return;
     }
-
-    final _pcLoader = (pcLoader != null) ? pcLoader : new GaussianLoader();
-    final _sceneLoader = (sceneUrl != null)
-      ? ((sceneLoader != null) ? sceneLoader : new GaussianLoader())
-      : null;
-
-    final pcPromise:Promise<ArrayBuffer> = _pcLoader.load(pcUrl);
-    final scenePromise:Promise<Dynamic> =
-      (sceneUrl != null && sceneUrl != "")
-        ? _sceneLoader.load(sceneUrl, "application/json")
-        : Promise.resolve(null);
-
-    Promise.all([pcPromise, scenePromise]).then(function(arr) {
-      final pc_data:ArrayBuffer          = cast arr[0];
-      final scene_data:Null<ArrayBuffer> = cast arr[1];
-
-      load_point_cloud(pc_data, pcUrl).then(function(_) {
-        if (scene_data != null) {
-          try {
-            load_scene_sync(scene_data, sceneUrl);
-          } catch (e:Dynamic) {
-            if (onError != null) { onError(e); return null; } else throw e;
-          }
-        }
-        if (onReady != null) onReady();
-        return null;
-      }).catchError(function(err) {
-        if (onError != null) onError(err); else throw err;
-        return null;
-      });
+    var url:String = cast source;
+    _loader.load(url, accept).then(function(bytes) {
+      onOk(bytes, url);
       return null;
-    }).catchError(function(err) {
-      if (onError != null) onError(err); else throw err;
+    }).catchError(function(e) {
+      onErr(e);
       return null;
     });
   }
 
-  /** Optional Promise wrapper around load_from_urls_cb for Promise-style callers. */
-  public function load_from_urls(
-    pcUrl:String,
-    ?sceneUrl:String,
-    ?pcLoader:GaussianLoader,
-    ?sceneLoader:GaussianLoader
-  ):Promise<Dynamic> {
-    return new Promise(function(resolve, reject) {
-      load_from_urls_cb(pcUrl, sceneUrl, pcLoader, sceneLoader, function() resolve(null), reject);
-    });
-  }
-
-  /**
-   * Load the point cloud and spin up the renderer + main loop.
-   * Must be called before load_scene_sync().
-   *
-   * Promise-based (SurfaceContext.create is async).
-   */
-  public function load_point_cloud(
-    file:ArrayBuffer,
-    pointcloud_file_path:Null<String>
-  ):Promise<Dynamic> {
-    final self = this;
-    return new Promise(function (resolve, reject) {
-      SurfaceContext.create(canvas, file, cfg).then(function(s) {
-        state = s;
-
-        // Bind input now that we have a controller
-        try {
-          _unbindInput = Internal.bind_input(canvas, state.controller);
-        } catch (_:Dynamic) {}
-
-        // Record source path
-        state.pointcloud_file_path = pointcloud_file_path;
-
-        // Resize to the captured backing-store size
-        self.applyCapturedSize();
-
-        self.installResizeHandlers();
-
-        // Optional env map
-        try {
-          if (cfg.skybox != null && state.set_env_map != null) {
-            state.set_env_map(cfg.skybox);
-          }
-        } catch (_:Dynamic) {
-          // non-fatal
-        }
-
-        // Start the render loop once
-        startLoop();
-
-        resolve(null);
-      }).catchError(reject);
-    });
-  }
-
-  /**
-   * Load optional scene JSON (camera sets, etc.).
-   * Requires load_point_cloud() to have completed.
-   * SYNCHRONOUS version (throws on error).
-   */
-  public function load_scene_sync(
-    sceneBuf:ArrayBuffer,
-    scene_file_path:Null<String>
-  ):Void {
-    if (state == null) throw 'Engine not ready: call load_point_cloud() before load_scene_sync().';
-
+  /** Decode JSON scene and apply to current state. Throws on error. */
+  inline function applySceneBytes(sceneBuf:ArrayBuffer, scene_file_path:Null<String>):Void {
+    if (state == null) throw 'Engine not ready: cannot set scene yet.';
     var td = new TextDecoder("utf-8");
     var jsonText = td.decode(new Uint8Array(sceneBuf));
     var json:Dynamic = haxe.Json.parse(jsonText);
@@ -191,8 +210,6 @@ class Engine {
     if (state.set_scene_camera != null) try state.set_scene_camera(0) catch (_:Dynamic) {}
     state.scene_file_path = scene_file_path;
   }
-
-  // ---------------------------- internals ----------------------------
 
   /** Compute real backing store from CSS size and DPR, min 1x1, floor like TS. */
   inline function backingFromCss():{ w:Int, h:Int, dpr:Float } {
@@ -210,7 +227,6 @@ class Engine {
     if (canvas.width != _capturedW)  canvas.width  = _capturedW;
     if (canvas.height != _capturedH) canvas.height = _capturedH;
 
-    // Typed direct call keeps DCE happy (you already have @:keep on SurfaceContext.resize)
     state.resize({ width: _capturedW, height: _capturedH }, _capturedDpr);
   }
 
