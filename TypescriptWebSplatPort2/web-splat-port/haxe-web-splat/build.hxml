@@ -19,8 +19,8 @@
 -cp libs
 -cp externs
 
---macro build.Build.embedAllCss("src")
---macro build.Build.embedAllJson("src")
+--macro gs.build.Build.embedAllCss("src")
+--macro gs.build.Build.embedAllJson("src")
 
 -dce full
 -debug

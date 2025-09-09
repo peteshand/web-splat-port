@@ -3,15 +3,16 @@ package;
 
 import js.Browser;
 import js.html.URLSearchParams;
-import utils.GpuUtils;
-import ui.LoadingDisplay;
+import gs.utils.GpuUtils;
+import gs.ui.LoadingDisplay;
+import gs.lib.Engine;
 
 @:expose
 class Main {
   static var _main:Main;
 
   var ui:LoadingDisplay;
-  var engine:lib.Engine;
+  var engine:Engine;
 
   public static function main() {
     Build.injectCss();
@@ -46,7 +47,7 @@ class Main {
     ui.showSpinner();
 
     // Engine construction (init canvas etc.)
-    engine = new lib.Engine();
+    engine = new Engine();
 
     // Bind UI progress to the engine's internal loader
     ui.bindToLoader(engine.loader);

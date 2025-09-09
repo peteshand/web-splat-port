@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "postinstall": "node ./scripts/install",
-    "copy-shaders": "copyfiles -u 1 \"src/shaders/**/*\" dist",
+    "copy-shaders": "copyfiles -u 1 \"src/gs/shaders/**/*\" dist",
     "build-haxe": "node ./scripts/compile",
     "build-webpack": "cross-env NODE_OPTIONS=--openssl-legacy-provider npx webpack --config webpack.config.js",
     "build": "npm run build-haxe && npm run build-webpack && npm run copy-shaders",

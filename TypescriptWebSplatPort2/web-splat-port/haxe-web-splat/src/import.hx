@@ -6,7 +6,7 @@ import js.Browser.navigator;
 import js.Browser.document;
 import js.Browser.window;
 //
-import build.Build;
+import gs.build.Build;
 //
 import webgpu.*;
 import gl_matrix.*;
@@ -22,22 +22,22 @@ import uniform.*;
 import animation.*;
 import controller.*;
 //
-import utils.*;
-import utils.Utils.buildCovScalar;
-import utils.Utils.shDegFromNumCoefs;
-import utils.Utils.shNumCoefficients;
-import utils.Utils.sigmoid;
+import gs.utils.*;
+import gs.utils.Utils.buildCovScalar;
+import gs.utils.Utils.shDegFromNumCoefs;
+import gs.utils.Utils.shNumCoefficients;
+import gs.utils.Utils.sigmoid;
 //
-import renderer.*;
-import renderer.SplattingArgsConst;
+import gs.renderer.*;
+import gs.renderer.SplattingArgsConst;
 //
-import camera.*;
-import camera.Internal;
-import camera.Types.Camera;
-import camera.Types.FrustumPlanes;
+import gs.camera.*;
+import gs.camera.Internal;
+import gs.camera.Types.Camera;
+import gs.camera.Types.FrustumPlanes;
 //
-import pointcloud.*;
-import pointcloud.types.*;
+import gs.pointcloud.*;
+import gs.pointcloud.types.*;
 //
 import js.lib.Promise;
 import js.lib.ArrayBuffer;
@@ -73,9 +73,9 @@ import haxe.Resource;
 import Reflect;
 import Type;
 //
-using utils.MapTools;
+using gs.utils.MapTools;
 //
-using utils.ArrayTools;
-using utils.MapTools;
+using gs.utils.ArrayTools;
+using gs.utils.MapTools;
 using StringTools;
 #end
