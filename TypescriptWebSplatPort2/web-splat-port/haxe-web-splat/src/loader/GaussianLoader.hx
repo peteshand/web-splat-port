@@ -40,7 +40,7 @@ extern class ReadableStreamDefaultController<T> {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Loader — fetches a URL (PLY/NPZ/etc.) and emits progress events.
+ * GaussianLoader — fetches a URL (PLY/NPZ/etc.) and emits progress events.
  *
  * Events (use the static string constants below):
  *  - EVT_START    : detail = { total: Null<Int> }          // total bytes if known
@@ -49,11 +49,11 @@ extern class ReadableStreamDefaultController<T> {
  *  - EVT_ERROR    : detail = { error:String }
  *
  * Usage:
- *   final loader = new loader.Loader();
- *   loader.addEventListener(loader.Loader.EVT_PROGRESS, (e) -> { ... });
+ *   final loader = new loader.GaussianLoader();
+ *   loader.addEventListener(loader.GaussianLoader.EVT_PROGRESS, (e) -> { ... });
  *   final bytes = loader.load(url); // returns Promise<ArrayBuffer>
  */
-class Loader extends EventTarget {
+class GaussianLoader extends EventTarget {
   public static inline var EVT_START    = "loaderstart";
   public static inline var EVT_PROGRESS = "loaderprogress";
   public static inline var EVT_END      = "loaderend";

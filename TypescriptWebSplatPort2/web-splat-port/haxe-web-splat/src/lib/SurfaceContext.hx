@@ -35,7 +35,7 @@ class SurfaceContext {
   // --- GPU / surface ---
   public var wgpu_context:GPUContext;
   var surface:GPUCanvasContext;
-  var config:SurfaceConfiguration;
+  public var config:SurfaceConfiguration;
   var window:CanvasElement;
   var scale_factor:Float;
 
@@ -49,11 +49,11 @@ class SurfaceContext {
   public var scene_file_path:Null<String> = null;
   var current_view:Null<Int> = null;
   var ui_renderer:EguiWGPU;
-  var fps:Float = 0;
+  public var fps:Float = 0;
   public var ui_visible:Bool = true;
 
   var display:Display;
-  var splatting_args:SplattingArgs;
+  public var splatting_args:SplattingArgs;
   var saved_cameras:Array<SceneCamera> = [];
   var stopwatch:Null<GPUStopwatch> = null;
 
@@ -67,6 +67,7 @@ class SurfaceContext {
   function new() {}
 
   /** prefer typed factory over reflection */
+  @:keep
   public static function create(
     window:CanvasElement,
     pc_file:js.lib.ArrayBuffer,
@@ -208,6 +209,7 @@ class SurfaceContext {
     });
   }
 
+  @:keep
   public function reload():Void {
     if (this.pointcloud_file_path == null) throw 'no pointcloud file path present';
     console.info('reloading volume from', this.pointcloud_file_path);
@@ -216,6 +218,7 @@ class SurfaceContext {
     }
   }
 
+  @:keep
   public function resize(new_size:{ width:Int, height:Int }, ?scale_factor:Float):Void {
     if (new_size != null && new_size.width > 0 && new_size.height > 0) {
       this.config.width = new_size.width;
@@ -241,6 +244,7 @@ class SurfaceContext {
     }
   }
 
+  @:keep
   public function ui():Array<Dynamic> {
     this.ui_renderer.begin_frame(this.window);
     var request_redraw:Bool = lib.EguiWGPU.Ui.ui(this);
@@ -248,6 +252,7 @@ class SurfaceContext {
     return [request_redraw, shapes];
   }
 
+  @:keep
   public function update(dt_seconds:Float):Void {
     var dt = dt_seconds;
 
@@ -298,6 +303,7 @@ class SurfaceContext {
     }
   }
 
+  @:keep
   public function render(redraw_scene:Bool, ?shapes:Dynamic):Void {
     if (this.stopwatch != null) this.stopwatch.reset();
 
@@ -380,6 +386,7 @@ class SurfaceContext {
   }
 
   // Public API used by the window bootstrapper
+  @:keep
   public function set_scene(scene:Scene):Void {
     var extend:Float = scene.getExtend();
     this.splatting_args.sceneExtend = extend;
@@ -407,6 +414,7 @@ class SurfaceContext {
     this._changed = true;
   }
 
+  @:keep
   public function set_scene_camera(i:Int):Void {
     if (this.scene == null) return;
     this.current_view = i;
@@ -421,31 +429,38 @@ class SurfaceContext {
     this.update_camera(pcam);
   }
 
+  @:keep
   public function set_env_map(_path:String):Promise<Dynamic> {
     this.splatting_args.showEnvMap = true;
     this._changed = true;
     return Promise.resolve(null);
   }
 
+  @:keep
   public function cancel_animation():Void {
     this.animation = null;
     this.controller.reset_to_camera(this.splatting_args.camera);
     this._changed = true;
   }
+
+  @:keep
   public inline function cancle_animation():Void cancel_animation(); // alias for legacy calls
 
+  @:keep
   public function stop_animation():Void {
     if (this.animation != null) this.animation[1] = false;
     this.controller.reset_to_camera(this.splatting_args.camera);
     this._changed = true;
   }
 
+  @:keep
   public function update_camera(camera:PerspectiveCamera):Void {
     this.splatting_args.camera = camera;
     this.splatting_args.camera.projection.resize(this.config.width, this.config.height);
     this._changed = true;
   }
 
+  @:keep
   public function save_view():Void {
     var sceneArr:Array<SceneCamera> = [];
     if (this.scene != null) {
@@ -467,17 +482,21 @@ class SurfaceContext {
     this.saved_cameras.push(cam);
   }
 
+  @:keep
   public inline function needsRedraw():Bool return _changed;
 
   // -------- helpers --------
+  @:keep
   static inline function toVec3(v:Array<Float>):Vec3 {
     return Vec3.fromValues(v[0], v[1], v[2]);
   }
+  @:keep
   static inline function toQuat(v:Mat3x3):Quat {
     var a:Array<Float> = cast v;
     return Quat.fromValues(a[0], a[1], a[2], a[3]);
   }
 
+  @:keep
   static inline function getCurrentTextureSafe(ctx:GPUCanvasContext):Null<GPUTexture> {
     var tex:GPUTexture = null;
     try tex = ctx.getCurrentTexture() catch (_:Dynamic) {}

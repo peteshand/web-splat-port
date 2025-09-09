@@ -14,11 +14,8 @@ import lib.SurfaceContext;
 import lib.RenderConfig;
 import scene.Scene;
 import lib.EguiWGPU.Internal;
+import loader.GaussianLoader;
 
-/**
- * Engine instance: set up once via initialize(), then call load_point_cloud() and (optionally) load_scene().
- * Mirrors the behavior in open_window.ts.
- */
 class Engine {
   // Instance state
   var canvas:CanvasElement;
@@ -34,45 +31,107 @@ class Engine {
   var _capturedH:Int = 600;
   var _capturedDpr:Float = 1.0;
 
-  function new() {}
+  /** Create/reuse canvas, capture initial size, and store config. */
+  public function new(?config:RenderConfig) {
+    cfg = (config != null) ? config : new RenderConfig(false, null, false);
 
-  /** Create or reuse the canvas, attach resize handlers, and store config. */
-  public static function initialize(?config:RenderConfig):Promise<Engine> {
-    return new Promise(function (resolve, reject) {
-      try {
-        var eng = new Engine();
-        eng.cfg = (config != null) ? config : new RenderConfig(false, null, false);
+    // Ensure a canvas exists
+    var c:CanvasElement = cast Browser.document.getElementById('window-canvas');
+    if (c == null) {
+      c = Browser.document.createCanvasElement();
+      c.id = 'window-canvas';
+      c.style.width = '100%';
+      c.style.height = '100%';
+      Browser.document.body.appendChild(c);
+    }
+    canvas = c;
 
-        // Ensure a canvas exists
-        var c:CanvasElement = cast Browser.document.getElementById('window-canvas');
-        if (c == null) {
-          c = Browser.document.createCanvasElement();
-          c.id = 'window-canvas';
-          c.style.width = '100%';
-          c.style.height = '100%';
-          Browser.document.body.appendChild(c);
+    // Capture desired backing size before wasm init
+    final css = backingFromCss();
+    _capturedW = css.w;
+    _capturedH = css.h;
+    _capturedDpr = css.dpr;
+
+    // Bootstrap at 800x600 like TS/Rust (SurfaceContext.resize will correct it)
+    c.width  = 800;
+    c.height = 600;
+  }
+
+  /** Convenience: check if SurfaceContext is ready */
+  public var isReady(get, never):Bool;
+  inline function get_isReady():Bool return state != null;
+
+  /**
+   * High-level bootstrap that loads the point cloud (required) and scene (optional)
+   * from URLs using provided loaders. Progress is emitted by the pcLoader you pass in.
+   */
+  public function load_from_urls_cb(
+    pcUrl:String,
+    ?sceneUrl:String,
+    ?pcLoader:GaussianLoader,
+    ?sceneLoader:GaussianLoader,
+    ?onReady:Void->Void,
+    ?onError:Dynamic->Void
+  ):Void {
+    if (pcUrl == null) {
+      if (onError != null) onError('Missing file URL');
+      return;
+    }
+
+    final _pcLoader = (pcLoader != null) ? pcLoader : new GaussianLoader();
+    final _sceneLoader = (sceneUrl != null)
+      ? ((sceneLoader != null) ? sceneLoader : new GaussianLoader())
+      : null;
+
+    final pcPromise:Promise<ArrayBuffer> = _pcLoader.load(pcUrl);
+    final scenePromise:Promise<Dynamic> =
+      (sceneUrl != null && sceneUrl != "")
+        ? _sceneLoader.load(sceneUrl, "application/json")
+        : Promise.resolve(null);
+
+    Promise.all([pcPromise, scenePromise]).then(function(arr) {
+      final pc_data:ArrayBuffer          = cast arr[0];
+      final scene_data:Null<ArrayBuffer> = cast arr[1];
+
+      load_point_cloud(pc_data, pcUrl).then(function(_) {
+        if (scene_data != null) {
+          try {
+            load_scene_sync(scene_data, sceneUrl);
+          } catch (e:Dynamic) {
+            if (onError != null) { onError(e); return null; } else throw e;
+          }
         }
-
-        eng.canvas = c;
-
-        // Phase 0: capture the real backing size we want to use immediately after init
-        final css = eng.backingFromCss();
-        eng._capturedW = css.w;
-        eng._capturedH = css.h;
-        eng._capturedDpr = css.dpr;
-
-        // Phase 1: initialize at 800x600 like Rust/TS do before the wasm canvas resize.
-        c.width  = 800;
-        c.height = 600;
-
-        resolve(eng);
-      } catch (e:Dynamic) {
-        reject(e);
-      }
+        if (onReady != null) onReady();
+        return null;
+      }).catchError(function(err) {
+        if (onError != null) onError(err); else throw err;
+        return null;
+      });
+      return null;
+    }).catchError(function(err) {
+      if (onError != null) onError(err); else throw err;
+      return null;
     });
   }
 
-  /** Load the point cloud and spin up the renderer + main loop. Must be called before load_scene(). */
+  /** Optional Promise wrapper around load_from_urls_cb for Promise-style callers. */
+  public function load_from_urls(
+    pcUrl:String,
+    ?sceneUrl:String,
+    ?pcLoader:GaussianLoader,
+    ?sceneLoader:GaussianLoader
+  ):Promise<Dynamic> {
+    return new Promise(function(resolve, reject) {
+      load_from_urls_cb(pcUrl, sceneUrl, pcLoader, sceneLoader, function() resolve(null), reject);
+    });
+  }
+
+  /**
+   * Load the point cloud and spin up the renderer + main loop.
+   * Must be called before load_scene_sync().
+   *
+   * Promise-based (SurfaceContext.create is async).
+   */
   public function load_point_cloud(
     file:ArrayBuffer,
     pointcloud_file_path:Null<String>
@@ -90,19 +149,18 @@ class Engine {
         // Record source path
         state.pointcloud_file_path = pointcloud_file_path;
 
-        // Phase 2: immediately resize to the captured real backing-store size
-        // (mirrors applyRealSize() right away, but with the pre-captured size)
+        // Resize to the captured backing-store size
         self.applyCapturedSize();
 
         self.installResizeHandlers();
 
-        // Optional env map (if cfg.skybox exists)
-        if (cfg.skybox != null) {
-          try {
+        // Optional env map
+        try {
+          if (cfg.skybox != null && state.set_env_map != null) {
             state.set_env_map(cfg.skybox);
-          } catch (_:Dynamic) {
-            // non-fatal
           }
+        } catch (_:Dynamic) {
+          // non-fatal
         }
 
         // Start the render loop once
@@ -113,32 +171,25 @@ class Engine {
     });
   }
 
-  /** Load optional scene JSON (camera sets, etc.). Requires load_point_cloud() called first. */
-  public function load_scene(
+  /**
+   * Load optional scene JSON (camera sets, etc.).
+   * Requires load_point_cloud() to have completed.
+   * SYNCHRONOUS version (throws on error).
+   */
+  public function load_scene_sync(
     sceneBuf:ArrayBuffer,
     scene_file_path:Null<String>
-  ):Promise<Dynamic> {
-    return new Promise(function (resolve, reject) {
-      if (state == null) {
-        reject('Engine not ready: call load_point_cloud() before load_scene().');
-        return;
-      }
-      try {
-        var td = new TextDecoder("utf-8");
-        var jsonText = td.decode(new Uint8Array(sceneBuf));
-        var json:Dynamic = haxe.Json.parse(jsonText);
-        var sc = Scene.fromJson(cast json);
+  ):Void {
+    if (state == null) throw 'Engine not ready: call load_point_cloud() before load_scene_sync().';
 
-        state.set_scene(sc);
-        // Match TS: switch to scene camera 0
-        try state.set_scene_camera(0) catch (_:Dynamic) {}
-        state.scene_file_path = scene_file_path;
+    var td = new TextDecoder("utf-8");
+    var jsonText = td.decode(new Uint8Array(sceneBuf));
+    var json:Dynamic = haxe.Json.parse(jsonText);
+    var sc = Scene.fromJson(cast json);
 
-        resolve(null);
-      } catch (err:Dynamic) {
-        reject(err);
-      }
-    });
+    state.set_scene(sc);
+    if (state.set_scene_camera != null) try state.set_scene_camera(0) catch (_:Dynamic) {}
+    state.scene_file_path = scene_file_path;
   }
 
   // ---------------------------- internals ----------------------------
@@ -159,6 +210,7 @@ class Engine {
     if (canvas.width != _capturedW)  canvas.width  = _capturedW;
     if (canvas.height != _capturedH) canvas.height = _capturedH;
 
+    // Typed direct call keeps DCE happy (you already have @:keep on SurfaceContext.resize)
     state.resize({ width: _capturedW, height: _capturedH }, _capturedDpr);
   }
 
@@ -177,7 +229,6 @@ class Engine {
   }
 
   function installResizeHandlers():Void {
-    // Responsive: observe element size + window events
     try {
       _resizeObserver = new ResizeObserver(function(_){ applyRealSize(); });
       _resizeObserver.observe(canvas);
@@ -202,65 +253,43 @@ class Engine {
         // --- UI ---
         var shapes:Dynamic = null;
         var redraw_ui:Bool = false;
-        var uiRes:Dynamic = null;
         try {
-          uiRes = state.ui();
+          var uiArr = state.ui();
+          if (uiArr != null && uiArr.length >= 2) {
+            // ui() returns [bool, shapes]
+            redraw_ui = (uiArr[0] == true);
+            shapes    = uiArr[1];
+          }
         } catch (_:Dynamic) {}
-
-        if (uiRes != null && uiRes.length >= 2) {
-          // ui() returns [bool, shapes]
-          redraw_ui = (uiRes[0] == true);
-          shapes    = uiRes[1];
-        }
 
         // --- Resolution change check (match TS) ---
         var resChange:Bool = false;
         try {
-          var resDyn:Dynamic = Reflect.field(state, "splatting_args");
-          if (resDyn != null) {
-            var res:Dynamic = Reflect.field(resDyn, "resolution");
-            var res0:Float = 0, res1:Float = 0;
+          if (state.splatting_args != null) {
+            var res:Float32Array = cast state.splatting_args.resolution;
+            var res0:Float = (res != null && res.length >= 1) ? res[0] : 0;
+            var res1:Float = (res != null && res.length >= 2) ? res[1] : 0;
 
-            // Support Float32Array or [number, number]
-            if (Std.isOfType(res, Float32Array)) {
-              var fa:Float32Array = cast res;
-              if (fa.length >= 2) { res0 = fa[0]; res1 = fa[1]; }
-            } else if (res != null && res.length >= 2) {
-              res0 = res[0];
-              res1 = res[1];
-            }
-
-            var cfgDyn:Dynamic = Reflect.field(state, "config");
-            var cw:Float = (cfgDyn != null && Reflect.hasField(cfgDyn, "width"))  ? Reflect.field(cfgDyn, "width")  : 0;
-            var ch:Float = (cfgDyn != null && Reflect.hasField(cfgDyn, "height")) ? Reflect.field(cfgDyn, "height") : 0;
-
+            var cw:Float = state.config.width;
+            var ch:Float = state.config.height;
             resChange = (res0 != cw || res1 != ch);
           }
         } catch (_:Dynamic) {
           resChange = false;
         }
 
-        // --- _changed flag (match TS) ---
-        var changed:Bool = false;
+        // --- redraw decision ---
+        var request_redraw:Bool = resChange;
         try {
-          var cDyn:Dynamic = Reflect.field(state, "_changed");
-          if (cDyn != null) changed = (cDyn == true);
-        } catch (_:Dynamic) {}
-
-        var request_redraw:Bool = changed || resChange;
-
-        // Optional needsRedraw()
-        try {
-          if (state.needsRedraw()) request_redraw = true;
+          if (state.needsRedraw != null && state.needsRedraw()) request_redraw = true;
         } catch (_:Dynamic) {}
 
         // Smoothed FPS like TS (fps = 1/dt * 0.05 + fps * 0.95)
         try {
-          var fpsPrev:Float = 0.0;
-          if (Reflect.hasField(state, "fps")) fpsPrev = Reflect.field(state, "fps");
+          var fpsPrev:Float = state.fps;
           var fpsNow = 1.0 / Math.max(1e-6, dt);
           var fpsSmooth = fpsNow * 0.05 + fpsPrev * 0.95;
-          Reflect.setField(state, "fps", fpsSmooth);
+          state.fps = fpsSmooth;
         } catch (_:Dynamic) {}
 
         // Render
@@ -273,7 +302,7 @@ class Engine {
     }
     Browser.window.requestAnimationFrame(loop);
 
-    // Kick an early size sync in case CSS changed between initialize and now
+    // Kick an early size sync in case CSS changed between construction and now
     applyRealSize();
   }
 }
